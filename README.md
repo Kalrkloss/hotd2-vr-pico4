@@ -143,6 +143,11 @@ Settings live in `/sdcard/Android/data/com.flycast.emulator.vr/files/emu.cfg`, u
   then follows where your hand is: a webcam in front of you can't tell which way a finger
   points straight at it, so the finger's direction is left out. Press `C` while aiming at
   the centre whenever you sit differently.
+  Two players: `play-fingergun.ps1 -Players 2`, two people side by side in front of one
+  webcam, one gun hand each (left in the preview is player 1, red crosshair; right is
+  player 2, light blue). `K` calibrates both in turn, each with their own settings. A
+  thumbs-up (a fist, thumb up) held for half a second presses the game's Start: that is how
+  player 2 joins in (and it pauses for a player already in the game).
 - `hotd2-vr/gun_model`: bakes a `.glb` gun model into `gun_model.h`.
 - `hotd2-vr/re/sh4dis.py`: disassembles game code from a Flycast RAM dump (Capstone),
   which is how the field-of-view literals were found.
