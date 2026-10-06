@@ -854,6 +854,8 @@ void updateLightgun(XrTime time)
 		recoilMat = glm::rotate(recoilMat, glm::radians(6.f * twist * std::max(kick, 0.f)), glm::vec3(0, 1, 0));
 		recoilMat = glm::translate(recoilMat, -hand);
 		gunView.pose = pose * recoilMat;
+		gunView.restMuzzle = o;
+		gunView.restForward = d;
 		gunView.trigger = std::clamp(pull, 0.f, 1.f);
 		gunView.now = time * 1e-9;
 		gunView.sinceShot = sinceShot;
@@ -1035,6 +1037,7 @@ void term()
 	triggerWas = recenterWas = false;
 	gunVisible = false;
 	lastShot = 0;
+	shotCount = 0;
 	initTried = false;
 }
 

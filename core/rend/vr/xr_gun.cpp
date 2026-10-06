@@ -330,14 +330,16 @@ void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& 
 	const glm::vec3 forward = glm::normalize(glm::vec3(gun.pose * glm::vec4(0.f, 0.f, -1.f, 0.f)));
 	// Muzzle flash: full for two headset frames, then gone in another 50 ms.
 	const float flash = gun.sinceShot < 0.f ? 0.f
-			: gun.sinceShot < 0.028f ? 1.f
-			: std::max(0.f, 1.f - (gun.sinceShot - 0.028f) / 0.05f);
+			: gun.sinceShot < 0.02f ? 1.f
+			: std::max(0.f, 1.f - (gun.sinceShot - 0.02f) / 0.05f);
 
 	// A new shot leaves smoke at the muzzle, drifting out of the barrel and upward.
 	if (gun.shot != lastShot)
 	{
 		lastShot = gun.shot;
-		for (unsigned k = 0; k < 3; k++)
+		// out of the barrel as it settles (the drawn gun is still kicked up now)
+		const glm::vec3 muzzle = gun.restMuzzle, forward = gun.restForward;
+		for (unsigned k = 0; gun.sinceShot < 0.1f && k < 3; k++)
 		{
 			const float spread = shotRandom(gun.shot, k) - 0.5f;
 			const glm::vec3 up(0.f, 1.f, 0.f);
@@ -366,8 +368,8 @@ void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& 
 
 	drawModel(viewProj, eyePos, gun.pose, glm::vec4(muzzle + forward * 0.02f, flash * 1.4f));
 
-	// Glowing bits, in room space, on top. The gun hides what passes behind it, except
-	// the aim dot, which always shows.
+	// Glowing bits, in room space, on top. Smoke and the aim line are hidden by the gun
+	// where they pass behind it; the muzzle flash and the aim dot always show.
 	static std::vector<GlowVertex> line, smokeVerts, flames, stars, dots;
 	line.clear();
 	smokeVerts.clear();
@@ -405,8 +407,9 @@ void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& 
 	{
 		// a tongue of fire out of the barrel, and a star burst with a white-hot core
 		const float reach = 0.07f + 0.06f * shotRandom(gun.shot, 7);
-		flame(flames, muzzle, forward, reach * (0.6f + 0.4f * flash), 0.016f, eyePos, glm::vec4(1.f, 0.55f, 0.15f, flash));
-		flame(flames, muzzle, forward, reach * 0.55f, 0.007f, eyePos, glm::vec4(1.f, 0.95f, 0.75f, flash));
+		const glm::vec3 tip = muzzle + forward * 0.006f;	// the lens sits a little inside the nose
+		flame(flames, tip, forward, reach * (0.6f + 0.4f * flash), 0.016f, eyePos, glm::vec4(1.f, 0.55f, 0.15f, flash));
+		flame(flames, tip, forward, reach * 0.55f, 0.007f, eyePos, glm::vec4(1.f, 0.95f, 0.75f, flash));
 		const glm::vec3 at = muzzle + forward * 0.012f;
 		billboard(stars, at, eyePos, 0.035f + 0.02f * flash, glm::vec4(1.f, 0.7f, 0.25f, flash));
 		billboard(stars, at, eyePos, 0.016f, glm::vec4(1.f, 1.f, 0.9f, flash));
@@ -433,9 +436,10 @@ void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& 
 	// light: added on top
 	glcache.BlendFunc(GL_SRC_ALPHA, GL_ONE);
 	drawGlowShape(Line, line);
+	// the flash is in front of the nose, which would hide most of it from behind the gun
+	glcache.Disable(GL_DEPTH_TEST);
 	drawGlowShape(Flame, flames);
 	drawGlowShape(Star, stars);
-	glcache.Disable(GL_DEPTH_TEST);
 	drawGlowShape(Dot, dots);
 	glDisableVertexAttribArray(VERTEX_POS_ARRAY);
 	glDisableVertexAttribArray(VERTEX_COL_BASE_ARRAY);

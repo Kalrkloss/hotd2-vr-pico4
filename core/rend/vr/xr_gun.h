@@ -22,6 +22,8 @@ constexpr glm::vec3 GunMuzzle { 0.00000f, 0.04710f, -0.14010f };
 struct GunView
 {
 	glm::mat4 pose { 1.f };		// gun space -> room space, recoil included
+	glm::vec3 restMuzzle { 0.f };	// room space, without recoil: where smoke leaves the barrel
+	glm::vec3 restForward { 0.f, 0.f, -1.f };
 	float trigger = 0.f;		// 0..1, how far the trigger is pulled
 	double now = 0.0;			// seconds, any steady clock (smoke drifts with it)
 	float sinceShot = 1e9f;		// seconds since the last shot
