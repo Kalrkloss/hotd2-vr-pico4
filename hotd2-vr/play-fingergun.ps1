@@ -8,7 +8,8 @@
   two trackers would both steer the crosshair.
 
   .\play-fingergun.ps1              one player
-  .\play-fingergun.ps1 -Players 2   two players (left hand on camera = P1)
+  .\play-fingergun.ps1 -Players 2   two people side by side: left in the preview = P1 (red
+                                    crosshair), right = P2 (light blue); thumbs-up = Start
   .\play-fingergun.ps1 -Camera 1    another webcam
 
   Needs the Windows build (build-win.cmd) and your own dump of the game (.cue/.gdi/.chd)
@@ -42,7 +43,16 @@ if ($running | Where-Object { $_.CommandLine -like "*$tracker*" }) {
 	exit 1
 }
 
-if ($running | Where-Object { $_.CommandLine -like "*$exe*" }) {
+$fly = $running | Where-Object { $_.CommandLine -like "*$exe*" } | Select-Object -First 1
+if ($fly) {
+	# the second gun is set on Flycast's command line: a Flycast started for one player has none
+	if ($Players -ge 2 -and $fly.CommandLine -notlike '*input:device2=7*') {
+		Write-Host "`nFlycast draait al met 1 pistool. Sluit Flycast en start opnieuw voor 2 spelers.`n"
+		exit 1
+	}
+	if ($Players -lt 2 -and $fly.CommandLine -like '*input:device2=7*') {
+		Write-Host 'Let op: Flycast draait nog met 2 pistolen; speler 2 wordt nu niet bestuurd.'
+	}
 	Write-Host 'Flycast draait al; alleen de tracker wordt gestart.'
 } else {
 	# Crosshair colours are ABGR: opaque red, opaque cyan

@@ -5,6 +5,12 @@ Finger guns for Flycast's emulated light gun, tracked with a webcam (MediaPipe).
   fire    drop your thumb onto your index finger, like the hammer of a finger gun
   reload  open your hand for a moment (spread the other fingers): an off-screen shot.
           --reload down: the old way, point the gun down or leave the view below.
+  start   thumbs-up (a fist, thumb up) for half a second: the game's Start (join, pause).
+          On by default with two players (--start-gesture on to use it alone too).
+
+Two players (--players 2): two people side by side in front of one webcam, one gun hand
+each; whoever is on the left of the preview is player 1 (red crosshair), on the right
+player 2 (light blue). Each has their own calibration (settings_2p_p1/p2.json).
 
 Ways to aim (m cycles): personal (default after a calibration: where your hand is and how
 it is turned, combined the way you aimed at nine calibration points, like a ray from your
@@ -13,10 +19,15 @@ direction only. The calibration measures all of them at once. Keys in the previe
 
   k        guided calibration: centre, edges, corners, then three test shots
   c        quick re-centre: aim at the centre of the game screen and press c
+  1 2      two players: which player the keys act on
+  K C      two players: calibrate both (one after the other) / re-centre everyone in view
+  s        Start for the chosen player (instead of the thumbs-up)
   [ ]      more / less movement needed for the same crosshair travel (calmer / snappier)
   t g      trigger more / less sensitive
   m        aiming: personal -> mix -> hand position -> gun direction
   x        marker on/off in session.csv (e.g. around a stretch where you don't shoot)
+  i        the webcam's own settings (e.g. switch off "low light compensation": in a dim
+           room many webcams halve their frame rate to expose longer)
   q, Esc   quit
 
 Sends "LG <player> <x> <y> <buttons>" datagrams (x, y in 1/10000ths of the screen) to
@@ -56,7 +67,20 @@ CURLED = ((9, 10, 12), (13, 14, 16), (17, 18, 20))
 # Landmarks logged raw to session.csv: wrist, index MCP/PIP/tip, middle and pinky MCP, thumb tip.
 LOG_POINTS = (0, 5, 6, 8, 9, 13, 17, 4, 1, 2, 3, 7)
 
-BTN_TRIGGER, BTN_RELOAD = 1, 2
+BTN_TRIGGER, BTN_RELOAD, BTN_START = 1, 2, 4
+
+# Thumbs-up = Start. Start also pauses the game, so it must not go off by itself: on every
+# logged session (finger guns, also pointing at the camera, steep, reloading, resting) the
+# rule below never got past 0.09 s of its 0.5 s.
+START_HOLD = 0.5        # s of thumbs-up evidence before Start
+START_PULSE = 0.15      # the Start bit is held this long (the game reads the gun every 20 ms)
+START_COOLDOWN = 2.0    # no new Start within this time, and only after the pose was let go
+FIST_BEND = 0.6         # middle and ring finger bend (cos) below this = curled
+CURL_COMMIT = 0.10      # a fist with the index curled this long: aim and trigger hold...
+CURL_RELEASE = 0.15     # ...until it has been gone this long
+OFF = -0.2              # a parked crosshair: off-screen, so not drawn in the game
+PLAYER_BGR = ((0, 0, 255), (255, 255, 0))      # P1 red, P2 light blue: the launcher's crosshairs
+PLAYER_NAME = ("rood", "lichtblauw")
 
 # Per measurement: default distance from centre to each screen edge (left, right, up,
 # down), the smallest allowed, how still "still" is during calibration, and how far an
@@ -268,6 +292,56 @@ class Trigger:
         return self.pressed
 
 
+def thumbs_up_reading(lm, aspect=0.75):
+    """
+    One frame's thumbs-up test on the image landmarks: x, y in image widths (aspect = frame
+    height / width) plus MediaPipe's relative depth z, distances in palm sizes. A finger gun
+    holds its thumb up too (about half of all logged play frames), so the decision rests on
+    the index finger: curled = its tip has come back nearer the wrist than its own middle
+    joint, and is less than a palm size from it. Logged finger guns, also pointing straight
+    at the camera, never met both (1st percentiles -0.06 and 1.10; a curled index reads
+    about -0.4 and 0.75). Returns (index curled, thumb up, the numbers).
+    """
+    q = lambda i: np.array([lm[i].x, lm[i].y * aspect, lm[i].z])
+    dist = lambda a, b: float(np.linalg.norm(q(a) - q(b)))
+    palm = (dist(0, 5) + dist(0, 17) + dist(5, 17) + dist(0, 9)) / 4 + 1e-9
+    tip_back = (dist(8, 0) - dist(6, 0)) / palm     # < 0: index tip nearer the wrist than its PIP
+    reach = dist(8, 0) / palm                       # index tip to wrist
+    y = lambda i: lm[i].y * aspect                  # image y grows downwards
+    over = (min(y(5), y(6), y(7), y(8)) - y(4)) / palm    # thumb tip above the whole index finger
+    vx, vy = lm[4].x - lm[2].x, (lm[4].y - lm[2].y) * aspect
+    vert = -vy / (math.hypot(vx, vy) + 1e-9)        # thumb MCP->tip: 1 = straight up on screen
+    above_ip = (y(3) - y(4)) / palm                 # thumb tip above its own IP joint
+    curled = tip_back < -0.20 and reach < 1.00
+    up = over > 0.30 and vert > 0.70 and above_ip > 0.05
+    return curled, up, (tip_back, reach, over, vert, above_ip)
+
+
+class StartGesture:
+    """
+    Thumbs-up held -> one Start. Evidence like the reload's: frames that read thumbs-up add
+    their time (at most 0.07 s each, so the first frame after a gap can't count for much),
+    others take it away again. Re-armed only once the evidence is back at zero and
+    START_COOLDOWN has passed, so a held thumb gives one Start, not start/pause/unpause.
+    """
+
+    def __init__(self):
+        self.evidence, self.armed, self.fired_at, self.until = 0.0, True, -10.0, 0.0
+
+    def update(self, hit, dt, now):
+        step = min(dt, 0.07)
+        self.evidence = min(self.evidence + step, START_HOLD) if hit else max(self.evidence - step, 0.0)
+        if self.armed and self.evidence >= START_HOLD - 1e-6:
+            self.armed, self.fired_at, self.until = False, now, now + START_PULSE
+            return True
+        if not self.armed and self.evidence <= 0.0 and now - self.fired_at > START_COOLDOWN:
+            self.armed = True
+        return False
+
+    def lost(self):
+        self.evidence = 0.0
+
+
 class Gun:
     """One player's finger gun: aiming, trigger and reload state."""
 
@@ -321,6 +395,12 @@ class Gun:
         self.recent_targets = collections.deque(maxlen=30)     # (time, target) for C
         self.trigger_quiet_until = 0.0
         self.lock = threading.Lock()    # update() runs on the main loop, output() on the sender
+        self.aspect = 0.75              # camera frame height / width (set from the frame)
+        self.start = StartGesture()
+        self.starts, self.start_at = 0, -10.0
+        self.start_blocked = False      # set while a calibration runs
+        self.tu, self.tu_parts = (math.nan,) * 5, (False, False, False)    # fist, index in, thumb up
+        self.curl_t0, self.curl_hold, self.curl_last = None, False, -10.0
         self.pitch_deg = 0.0
         self.hand_y = 0.5
         self.target = np.array([0.5, 0.5])
@@ -410,6 +490,7 @@ class Gun:
         # image x, y and MediaPipe's relative depth of a few landmarks, for tuning later
         self.raw = np.array([[lm[i].x, lm[i].y, lm[i].z] for i in LOG_POINTS]).reshape(-1)
         self.lost_handled = False
+        self.trigger.event = ""         # (logged; it would otherwise repeat on frames it doesn't run)
 
         # Open hand: two of the three curled fingers straight (the pinky often reads half
         # bent). A finger counts as straight when it bends little at the middle joint AND
@@ -437,13 +518,24 @@ class Gun:
             self.hand_open = False
             # the hand settles back into the gun grip: no shot from that, and the
             # readings of the open hand shouldn't steer the aim
-            self.trigger_quiet_until = now + 0.3
+            self.trigger_quiet_until = now + args.reload_quiet
             self.clear_recent()
+        # Thumbs-up = Start (a fist with the thumb up: not a finger gun, whose index is out)
+        curled, up, self.tu = thumbs_up_reading(lm, self.aspect)
+        fist = max(self.bend[0], self.bend[1]) < FIST_BEND and not self.hand_open
+        self.tu_parts = (fist, curled, up)
+        if args.start_gesture == "on" and not self.start_blocked:
+            self.start.update(fist and curled and up and not self.trigger.pressed, dt, now)
+        else:
+            self.start.lost()
         if args.reload == "open" and (self.hand_open or was_open):
             # Opening the hand also opens the thumb: don't let the trigger learn that as
             # its open level, and keep the crosshair where it was.
             self.trigger.reset()
             self.offscreen = self.hand_open
+            self.curl_t0 = None
+            return
+        if args.curl_hold == "on" and self.curl_step(fist and curled, now):
             return
 
         # Gun direction in 3D (metres). The barrel blends wrist->fingertip (long, steady)
@@ -515,6 +607,49 @@ class Gun:
             self.ease_until = self.held_until + 0.15
         self.screen = self.held_pos if (self.held_pos is not None and now < self.held_until) else smoothed
 
+    def curl_step(self, curl, now):
+        """
+        A fist with the index curled (thumbs-up, or just a fist) is not a finger gun: hold aim
+        and trigger, so the raised thumb can't become the trigger's open level (a false shot
+        afterwards) and a resting fist can't shoot. One or two such frames inside a finger gun
+        are misreads: only skipped, a press in progress carries on. True = skip this frame.
+        """
+        if curl:
+            if self.curl_t0 is None:
+                self.curl_t0 = now
+            self.curl_last = now
+            if not self.curl_hold and now - self.curl_t0 >= CURL_COMMIT - 1e-6:
+                self.curl_hold = True
+                self.trigger.reset()
+            return True
+        self.curl_t0 = None
+        if not self.curl_hold:
+            return False
+        if now - self.curl_last <= CURL_RELEASE:
+            return True
+        self.curl_hold = False
+        self.trigger.reset()
+        self.trigger_quiet_until = now + self.args.reload_quiet
+        self.clear_recent()
+        return False
+
+    def handover(self, now):
+        """This gun just got a hand that may not be the one it had (two players: back after a
+        loss, or a new hand): nothing of the previous hand's press, Start or filters. The
+        trigger's open levels stay: the thumb distance is metric, about the same for any hand,
+        and re-learning them from the first frame (maybe with the thumb down) cost shots."""
+        self.trigger.reset()
+        self.trigger_quiet_until = now + self.args.reload_quiet
+        self.start.lost()
+        self.curl_t0, self.curl_hold = None, False
+        self.hand_open, self.open_evidence = False, 0.0
+        self.clear_recent()
+        self.filter = OneEuro(self.args.min_cutoff, self.args.beta)
+        self.history.clear()
+        self.recent_targets.clear()
+        self.held_pos, self.out = None, None
+        self.last_t = None
+
     def output(self, now):
         """
         Crosshair to send now. The camera gives ~30 new positions a second, the game reads
@@ -554,6 +689,8 @@ class Gun:
         self.trigger.reset()
         self.hand_open = False
         self.open_evidence = 0.0
+        self.start.lost()
+        self.curl_t0 = None
         if not self.lost_handled:
             self.lost_handled = True
             self.events.append((now, "hand kwijt"))
@@ -573,6 +710,8 @@ class Gun:
             b |= BTN_RELOAD
         elif self.trigger.pressed and not self.offscreen:
             b |= BTN_TRIGGER
+        if now < self.start.until:
+            b |= BTN_START
         new = b & ~self.last_buttons
         if new & BTN_TRIGGER:
             self.shots += 1
@@ -582,6 +721,10 @@ class Gun:
             self.reloads += 1
             self.reload_at = now
             self.events.append((now, "HERLADEN"))
+        if new & BTN_START:
+            self.starts += 1
+            self.start_at = now
+            self.events.append((now, "START"))
         self.last_buttons = b
         return b
 
@@ -782,8 +925,14 @@ def fit_aim(fit_data, use="hand", ridge=1e-3, centre_weight=8.0):
     return W, float(np.mean(errors))
 
 
+def settings_path(gun):
+    """One player: settings.json. Two players: a file each, so neither overwrites the other
+    nor the one-player calibration."""
+    return SETTINGS if gun.args.players == 1 else HERE / f"settings_2p_p{gun.player + 1}.json"
+
+
 def save_settings(gun):
-    data = {"version": 3, "mode": gun.mode, "trigger_ratio": gun.trigger.ratio,
+    data = {"version": 3, "mode": gun.mode, "trigger_ratio": gun.trigger.ratio, "calibrated": bool(gun.calibrated),
             "centers": {k: v.tolist() for k, v in gun.centers.items()},
             "ranges": {k: v.tolist() for k, v in gun.ranges.items()},
             "reliable": {k: v.tolist() for k, v in gun.reliable.items()}}
@@ -793,15 +942,19 @@ def save_settings(gun):
         data["fit"] = {"weights": gun.fit.tolist(), "gain": gun.fit_gain,
                        "offset": gun.fit_offset.tolist(), "error_px": gun.fit_error_px}
     try:
-        SETTINGS.write_text(json.dumps(data, indent=1))
+        settings_path(gun).write_text(json.dumps(data, indent=1))
     except OSError:
         pass
 
 
 def load_settings(gun):
-    """Returns False when there is nothing usable yet (first run or older format)."""
+    """Returns False when there is nothing usable yet (first run or older format). A two-
+    player gun without its own file yet starts from the one-player calibration, marked as
+    not calibrated (it was made at another distance: the preview asks for K)."""
+    path = settings_path(gun)
+    template = path != SETTINGS and not path.exists()
     try:
-        data = json.loads(SETTINGS.read_text())
+        data = json.loads((SETTINGS if template else path).read_text())
     except (OSError, ValueError):
         return False
     if data.get("version", 0) < 3:
@@ -819,12 +972,22 @@ def load_settings(gun):
     ref = data.get("reference")
     if ref:
         gun.ref_pts, gun.ref_dir = np.array(ref["points"]), np.array(ref["direction"])
+    half = 0.25 if gun.player == 0 else 0.75
+    if template:
+        # the one-player centre is in the middle of the camera image; this player stands in
+        # their own half: put the centre in the middle of that (for every aiming mode)
+        gun.centers["hand"] = np.array([half, gun.centers["hand"][1]])
     fit = data.get("fit")
     if fit:
         gun.fit = np.array(fit["weights"])
         gun.fit_gain, gun.fit_offset = fit["gain"], np.array(fit["offset"])
         gun.fit_error_px = fit.get("error_px")
-    gun.calibrated = True
+        if template:
+            centre = np.array([half, gun.centers["hand"][1], 0.0, 0.0, 1.0])
+            gun.fit_offset = np.array([-gun.fit_gain * (gun.fit[0] @ centre - 0.5), gun.fit_offset[1]])
+    # (a two-player file saved before its own calibration - e.g. after t or [ - stays "not
+    # calibrated": only K or c make it so)
+    gun.calibrated = bool(data.get("calibrated", True)) and not template
     return True
 
 
@@ -842,11 +1005,21 @@ def put(img, text, org, scale=0.6, colour=(255, 255, 255), thick=1):
 # Colours (BGR) for the preview: one per input, used on the hand and in the panel.
 C_AIM, C_FIRE, C_RELOAD = (90, 230, 90), (60, 60, 255), (255, 170, 40)
 C_IDLE, C_TEXT, C_DIM = (110, 110, 110), (235, 235, 235), (150, 150, 150)
+C_START = (60, 220, 255)
 PANEL_W = 300
 FLASH = 0.35        # seconds a shot / reload lights up
 
 
-def draw_hand(out, lm, gun):
+def draw_spare(out, lm):
+    """A hand that isn't anyone's gun (two players: a free hand): thin and grey."""
+    h, w = out.shape[:2]
+    pt = lambda i: (int((1 - lm[i].x) * w), int(lm[i].y * h))
+    for chain in ((0, 1, 2, 3, 4), (0, 5, 6, 7, 8), (9, 10, 11, 12), (13, 14, 15, 16), (17, 18, 19, 20), (5, 9, 13, 17, 0)):
+        for a, b in zip(chain, chain[1:]):
+            cv2.line(out, pt(a), pt(b), C_IDLE, 1, cv2.LINE_AA)
+
+
+def draw_hand(out, lm, gun, label=None):
     """The tracked hand, coloured by what each part does: index aims, thumb fires, the
     other three fingers reload when straightened."""
     h, w = out.shape[:2]
@@ -863,6 +1036,11 @@ def draw_hand(out, lm, gun):
             cv2.line(out, pt(a), pt(b), colour, 3, cv2.LINE_AA)
     cv2.circle(out, pt(INDEX_TIP), 7, C_AIM, 2, cv2.LINE_AA)
     cv2.circle(out, pt(THUMB_TIP), 7, thumb, -1 if gun.pressed else 2, cv2.LINE_AA)
+    if gun.start.evidence > 0:
+        # thumbs-up building up to Start: a ring around the thumb fills
+        cv2.ellipse(out, pt(THUMB_TIP), (16, 16), -90, 0, 360 * gun.start.evidence / START_HOLD, C_START, 3, cv2.LINE_AA)
+    if label:
+        put(out, label, (pt(WRIST)[0] - 12, pt(WRIST)[1] + 26), 0.6, PLAYER_BGR[gun.player], 2)
 
 
 def bar(img, x, y, w, h, frac, colour, mark=None):
@@ -889,10 +1067,13 @@ def text(img, s, org, scale=0.5, colour=C_TEXT, thick=1):
     cv2.putText(img, s, org, cv2.FONT_HERSHEY_SIMPLEX, scale, colour, thick, cv2.LINE_AA)
 
 
-def draw_panel(panel, gun, y0, height, now, compact):
+def draw_panel(panel, gun, y0, height, now, compact, selected=False):
     x, w = 10, PANEL_W - 20
     seen = now - gun.seen < 0.25
-    text(panel, f"SPELER {gun.player + 1}", (x, y0 + 22), 0.65, C_TEXT, 2)
+    two = gun.args.players > 1
+    if two and selected:
+        cv2.rectangle(panel, (2, y0 + 2), (PANEL_W - 3, y0 + height - 4), PLAYER_BGR[gun.player], 1)
+    text(panel, f"SPELER {gun.player + 1}", (x, y0 + 22), 0.65, PLAYER_BGR[gun.player] if two else C_TEXT, 2)
     if not seen:
         text(panel, "HAND NIET IN BEELD", (x + 110, y0 + 22), 0.5, (0, 140, 255), 2)
     else:
@@ -965,19 +1146,34 @@ def draw_panel(panel, gun, y0, height, now, compact):
          C_RELOAD if gun.offscreen else C_DIM, 2 if gun.offscreen else 1)
     y += ch + 8
 
+    # Start: thumbs-up (fist, index curled in, thumb up) held for half a second
+    if gun.args.start_gesture == "on" or gun.starts > 0:
+        ch = 46
+        sflash = max(0.0, 1 - (now - gun.start_at) / FLASH)
+        card(panel, x, y, w, ch, "START", "duim omhoog, vuist", C_START, gun.start.evidence > 0, sflash)
+        text(panel, f"{gun.starts}x", (x + w - 50, y + 22), 0.55, C_TEXT, 2)
+        for i, (name, ok) in enumerate(zip(("vuist", "wijsv. in", "duim op"), gun.tu_parts)):
+            text(panel, name, (x + 10 + i * 64, y + 40), 0.4, C_START if ok and seen else C_DIM)
+        bar(panel, x + 205, y + 33, w - 215, 8, 1.0 if now < gun.start.until else gun.start.evidence / START_HOLD, C_START)
+        y += ch + 8
+
     if not compact:
         # what the game got, newest first
         text(panel, "laatst:", (x, y + 14), 0.45, C_DIM)
         for i, (ts, ev) in enumerate(reversed(gun.events)):
-            colour = {"PANG": C_FIRE, "HERLADEN": C_RELOAD}.get(ev, (0, 140, 255))
+            colour = {"PANG": C_FIRE, "HERLADEN": C_RELOAD, "START": C_START}.get(ev, (0, 140, 255))
             text(panel, f"{ev}  {now - ts:4.1f}s", (x + 60 + (i % 2) * 115, y + 14 + (i // 2) * 18), 0.45, colour)
 
 
-def draw(frame, guns, hands, wizard, fps):
+def draw(frame, guns, mine, spare, wizard, fps, split=0.5, sel=0):
     h, w = frame.shape[:2]
     out = cv2.flip(frame, 1)
-    for lm, gun in zip(hands, guns):
-        draw_hand(out, lm, gun)
+    two = len(guns) > 1
+    for hand in spare:
+        draw_spare(out, hand[0])
+    for gun, hand in zip(guns, mine):
+        if hand is not None:
+            draw_hand(out, hand[0], gun, f"P{gun.player + 1}" if two else None)
 
     # mini game screen, bottom right
     sw, sh = 160, 120
@@ -989,14 +1185,16 @@ def draw(frame, guns, hands, wizard, fps):
         key = wizard.key
         if key == "done":
             put(out, "Klaar! Veel plezier.", (20, 60), 1.0, (0, 255, 120), 2)
-            if guns[0].fit_error_px is not None:
-                err = guns[0].fit_error_px
+            if wizard.gun.fit_error_px is not None:
+                err = wizard.gun.fit_error_px
                 put(out, f"Gemiddelde afwijking op de kalibratiepunten: {err:.0f} px", (20, 100), 0.55,
                     (0, 255, 120) if err < 90 else (0, 140, 255))
                 if err >= 90:
                     put(out, "Veel: druk K en richt elk punt rustig en precies", (20, 128), 0.55, (0, 140, 255))
         else:
-            put(out, f"Kalibratie - stap {wizard.step + 1} van {len(wizard.STEPS)}", (20, 34), 0.6, (200, 200, 200), 1)
+            who = (f"SPELER {wizard.gun.player + 1} ({PLAYER_NAME[wizard.gun.player]} vizier) - " if two else "")
+            put(out, f"Kalibratie {who}stap {wizard.step + 1} van {len(wizard.STEPS)}", (20, 34), 0.6,
+                PLAYER_BGR[wizard.gun.player] if two else (200, 200, 200), 1)
             put(out, wizard.STEPS[wizard.step][1], (20, 70), 0.7, (0, 255, 255), 2)
             hint = {"intro": "Druk op SPATIE of schiet een keer om te beginnen",
                     "shoot": "Duim omlaag en weer omhoog"}.get(key, "Houd even stil - hij legt zichzelf vast (spatie = nu)")
@@ -1016,32 +1214,178 @@ def draw(frame, guns, hands, wizard, fps):
         return out
 
     now = time.perf_counter()
-    # the camera image flashes on what the game just got
+    sx = int(split * w)
+    if two:
+        # each player's half: the line between them, and their names
+        cv2.line(out, (sx, 34), (sx, h - 56), (200, 200, 200), 1, cv2.LINE_AA)
+        put(out, "SPELER 1", (10, 24), 0.55, PLAYER_BGR[0], 2)
+        put(out, "SPELER 2", (sx + 10, 24), 0.55, PLAYER_BGR[1], 2)
+    # the camera image (that player's half) flashes on what the game just got
     for gun in guns:
-        for at, colour in ((gun.shot_at, C_FIRE), (gun.reload_at, C_RELOAD)):
+        x0, x1 = ((0, w - 1) if not two else (0, sx) if gun.player == 0 else (sx, w - 1))
+        for at, colour in ((gun.shot_at, C_FIRE), (gun.reload_at, C_RELOAD), (gun.start_at, C_START)):
             if now - at < FLASH:
-                cv2.rectangle(out, (0, 0), (w - 1, h - 1), colour, 8)
+                cv2.rectangle(out, (x0, 0), (x1, h - 1), colour, 8)
     camera_fps = (0, 140, 255) if fps < 20 else C_DIM
-    put(out, f"camera {fps:.0f} fps", (w - 135, 24), 0.5, camera_fps)
+    put(out, f"camera {fps:.0f} fps", (w - 135, 48 if two else 24), 0.5, camera_fps)
     if fps < 20:
-        put(out, "traag: meer licht of minder andere programma's", (10, h - 44), 0.45, camera_fps)
-    if not guns[0].calibrated:
-        put(out, "Druk K voor de kalibratie", (10, h - 16), 0.65, (0, 255, 255), 2)
+        put(out, "traag: meer licht of minder andere programma's", (10, h - 60), 0.45, camera_fps)
+    todo = [str(g.player + 1) for g in guns if not g.calibrated]
+    if not two:
+        if todo:
+            put(out, "Druk K voor de kalibratie", (10, h - 16), 0.65, (0, 255, 255), 2)
+        else:
+            put(out, "K = kalibreren   C = midden   [ ] = gevoeligheid   M = richtmethode   I = camera   Q = stoppen",
+                (10, h - 16), 0.42, (220, 220, 220))
+        if guns[0].args.start_gesture == "on":
+            put(out, "duim omhoog (vuist) = START   S = start", (10, h - 36), 0.42, C_START)
     else:
-        put(out, "K = kalibreren (9 punten)   C = midden   [ ] = gevoeligheid   M = richtmethode   Q = stoppen",
-            (10, h - 16), 0.42, (220, 220, 220))
+        if todo:
+            put(out, f"Nog niet gekalibreerd: speler {' en '.join(todo)} - druk K (allebei) of 1/2 en dan k",
+                (10, h - 16), 0.45, (0, 255, 255), 1)
+        else:
+            put(out, "K = allebei kalibreren   C = allebei midden   [ ] gevoeligheid   I = camera   Q = stoppen",
+                (10, h - 16), 0.42, (220, 220, 220))
+        put(out, f"1/2 = kies speler (nu {sel + 1})   k / c = alleen die speler   duim omhoog = START",
+            (10, h - 36), 0.42, C_START)
 
-    compact = len(guns) > 1
-    section = 312 if compact else max(h, 430)
+    compact = two
+    section = 366 if compact else max(h, 430)
     height = max(h, section * len(guns))
     panel = np.full((height, PANEL_W, 3), 24, np.uint8)
     for i, gun in enumerate(guns):
         with gun.lock:     # the sender thread adds events and moves the crosshair
-            draw_panel(panel, gun, i * section, section, now, compact)
+            draw_panel(panel, gun, i * section, section, now, compact, i == sel)
     canvas = np.zeros((height, w + PANEL_W, 3), np.uint8)
     canvas[:h, :w] = out
     canvas[:, w:] = panel
     return canvas
+
+
+class Assigner:
+    """
+    Which found hand is whose gun: two players side by side in front of one camera, the left
+    one in the (mirrored) preview is P1. MediaPipe has no track ids and no stable order, so
+    by position:
+      1. a tracked hand stays with its player: the nearest within GATE of where it was less
+         than LIVE s ago, until it is more than CROSS past the split line;
+      2. after a short loss (< RECENT s) a player gets a hand back within REACQ of its own
+         last spot, on its own side of the line;
+      3. otherwise a new hand goes to a player without one once seen ACQUIRE frames in a row,
+         on that player's side and MARGIN clear of the line while the other player is around.
+    The line follows the middle between the two players' hands slowly (~1 s), within
+    0.35-0.65. Replayed with two logged one-player sessions side by side: no swaps while the
+    hands were 0.28 image widths or more apart. Returns per player the hand (or None) and
+    whether it is fresh (rules 2 and 3: maybe not the hand the gun had), plus spare hands.
+
+    A hand that was in view as a spare while a player had their own gun hand is not that
+    player's gun hand (a free hand, a supporting hand): when the gun hand drops out for a
+    frame, the player waits for it instead of taking the free hand and keeping it. Among new
+    hands a finger gun (index out) goes before a fist.
+    """
+    GATE, REACQ, MARGIN, CROSS, DUP = 0.12, 0.25, 0.05, 0.10, 0.04   # image widths
+    LIVE, RECENT, ACQUIRE, FOLLOW = 0.25, 1.0, 3, 0.05
+
+    def __init__(self, players):
+        self.n, self.split, self.spare = players, 0.5, 0
+        self.last = [None] * players        # (anchor, time) per player
+        self.cand = []                      # (anchor, frames seen, players that had a hand meanwhile)
+
+    @staticmethod
+    def anchor(lm):
+        """Mirrored middle of the wrist and index knuckle: steady in a gun, fist or open hand."""
+        return np.array([1 - (lm[WRIST].x + lm[INDEX_MCP].x) / 2, (lm[WRIST].y + lm[INDEX_MCP].y) / 2])
+
+    def side(self, p, x):
+        """> 0: on player p's side of the line, by that much."""
+        return self.split - x if p == 0 else x - self.split
+
+    def recent(self, p, now, within):
+        return self.last[p] is not None and now - self.last[p][1] < within
+
+    def __call__(self, found, now):
+        if self.n == 1:                     # one player: the hand MediaPipe gives (as before)
+            self.spare = max(len(found) - 1, 0)
+            return [found[0] if found else None], [False], list(found[1:])
+        # the same hand found twice: keep the copy nearest a player's last spot
+        def near(a):
+            d = [np.linalg.norm(a - l[0]) for l in self.last if l is not None]
+            return min(d) if d else 0.0
+        hands = []
+        for h in sorted(found, key=lambda h: near(self.anchor(h[0]))):
+            a = self.anchor(h[0])
+            if all(np.linalg.norm(a - b) > self.DUP for _, b in hands):
+                hands.append((h, a))
+        mine, fresh, used = [None] * self.n, [False] * self.n, set()
+
+        # last frame's spares, linked one-to-one to this frame's hands (nearest pairs first)
+        link = {}
+        taken = set()
+        for d, i, k in sorted((float(np.linalg.norm(a - c[0])), i, k)
+                              for i, (_, a) in enumerate(hands) for k, c in enumerate(self.cand)):
+            if d < self.GATE and i not in link and k not in taken:
+                link[i] = self.cand[k]
+                taken.add(k)
+
+        def barred(p, i):
+            """hand i was a spare while p had a hand, and is nearer that spare than p's own spot"""
+            c = link.get(i)
+            a = hands[i][1]
+            return (c is not None and p in c[2] and self.recent(p, now, self.RECENT)
+                    and np.linalg.norm(a - c[0]) < np.linalg.norm(a - self.last[p][0]))
+
+        def match(within, reach, slack, is_fresh):
+            pairs = sorted((float(np.linalg.norm(a - self.last[p][0])), p, i)
+                           for p in range(self.n) if mine[p] is None and self.recent(p, now, within)
+                           for i, (_, a) in enumerate(hands) if i not in used)
+            for d, p, i in pairs:
+                if (d < reach and mine[p] is None and i not in used and self.side(p, hands[i][1][0]) > -slack
+                        and not barred(p, i)):
+                    mine[p], fresh[p] = i, is_fresh
+                    used.add(i)
+
+        match(self.LIVE, self.GATE, self.CROSS, False)      # 1. still tracked
+        match(self.RECENT, self.REACQ, 0.0, True)           # 2. back after a short loss
+        seen = {i: 1 + (link[i][1] if i in link else 0) for i in range(len(hands))}
+        for p in range(self.n):                             # 3. new hands
+            if mine[p] is not None:
+                continue
+            margin = self.MARGIN if self.recent(1 - p, now, self.RECENT) else 0.0
+            ok = [i for i in range(len(hands)) if i not in used and seen[i] >= self.ACQUIRE
+                  and self.side(p, hands[i][1][0]) > margin and not barred(p, i)]
+            if ok:
+                # a finger gun before a fist, then the higher hand (a free hand usually hangs
+                # lower), then the one seen longest
+                i = min(ok, key=lambda i: (thumbs_up_reading(hands[i][0][0])[0], round(float(hands[i][1][1]), 2), -seen[i]))
+                mine[p], fresh[p] = i, True
+                used.add(i)
+        had = {p for p in range(self.n) if mine[p] is not None}
+        self.cand = [(a, seen[i], (link[i][2] if i in link else set()) | had)
+                     for i, (_, a) in enumerate(hands) if i not in used]
+        for p, i in enumerate(mine):
+            if i is not None:
+                self.last[p] = (hands[i][1], now)
+        if all(self.recent(p, now, self.RECENT) for p in range(self.n)):
+            mid = (self.last[0][0][0] + self.last[1][0][0]) / 2
+            self.split += self.FOLLOW * (float(np.clip(mid, 0.35, 0.65)) - self.split)
+        spare = [h for i, (h, _) in enumerate(hands) if i not in used]
+        self.spare = len(spare)
+        return [None if i is None else hands[i][0] for i in mine], fresh, spare
+
+
+def frame_for(gun, wizard, now):
+    """What to send for this gun now: (x, y, buttons). Call under gun.lock."""
+    gun.check_lost(now)
+    if wizard is not None:
+        # no shots while calibrating; the calibrating player's crosshair marks where to aim,
+        # the other one is parked off-screen
+        gun.out = None
+        x, y = FIT_POINTS.get(wizard.key, (0.5, 0.5)) if wizard.gun is gun else (OFF, OFF)
+        return x, y, 0
+    (x, y), buttons = gun.output(now), gun.buttons(now)
+    if gun.args.players > 1 and now - gun.seen > 2.0:
+        x = y = OFF                     # nobody there: no crosshair in the game
+    return x, y, buttons
 
 
 def claim_single_instance():
@@ -1098,8 +1442,17 @@ def main():
                     help="crosshair between camera frames: ease towards it, run ahead, or step")
     ap.add_argument("--chase-tau", type=float, default=0.03, help="--output chase: time constant (s)")
     ap.add_argument("--glide", type=float, default=0.05, help="--output extrap: max seconds ahead")
+    ap.add_argument("--start-gesture", choices=("auto", "on", "off"), default="auto",
+                    help="thumbs-up held 0.5 s = Start (auto: on with two players)")
+    ap.add_argument("--curl-hold", choices=("on", "off"), default="on",
+                    help="a fist with the index curled holds aim and trigger (no shots from a resting fist)")
+    ap.add_argument("--reload-quiet", type=float, default=0.3,
+                    help="s after the hand closes (reload, fist) before the trigger may fire")
+    ap.add_argument("--max-hands", type=int, default=4, help="two players: hands MediaPipe may track at once")
     ap.add_argument("--no-preview", action="store_true")
     args = ap.parse_args()
+    if args.start_gesture == "auto":
+        args.start_gesture = "on" if args.players > 1 else "off"
 
     lock = claim_single_instance()
     if sys.platform == "win32":
@@ -1110,16 +1463,29 @@ def main():
     landmarker = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(HERE / "hand_landmarker.task")),
         running_mode=vision.RunningMode.VIDEO,
-        num_hands=args.players,
+        # two players: room for a free hand or two besides the gun hands
+        num_hands=1 if args.players == 1 else max(args.max_hands, 2),
         min_hand_detection_confidence=0.5,
         min_hand_presence_confidence=0.5,
         min_tracking_confidence=0.5))
     cam = LatestFrame(args.camera, 640, 480, 60)
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     dest = ("127.0.0.1", args.port)
+    if args.players == 1:
+        # an earlier two-player run may have left player 2's crosshair standing in Flycast
+        sock.sendto(f"LG 1 {round(OFF * 10000)} {round(OFF * 10000)} 0".encode(), dest)
     guns = [Gun(i, args) for i in range(args.players)]
-    # first run, or settings from an older version: start with the guided calibration
-    wizard = None if load_settings(guns[0]) else Wizard(guns[0])
+    if args.players == 1:
+        # first run, or settings from an older version: start with the guided calibration
+        wizard = None if load_settings(guns[0]) else Wizard(guns[0])
+    else:
+        for g in guns:
+            load_settings(g)
+        wizard = None
+    queue = []          # players still to calibrate after this one (K)
+    sel = 0             # the player the keys act on (1 / 2)
+    assign = Assigner(args.players)
+    mine, spare = [None] * len(guns), []
     sent = [(0.5, 0.5, 0)] * len(guns)     # last thing sent per gun, for session.csv
     stop = threading.Event()
 
@@ -1129,24 +1495,23 @@ def main():
         nxt = time.perf_counter()
         while not stop.is_set():
             now = time.perf_counter()
-            for i, gun in enumerate(guns):
-                with gun.lock:
-                    gun.check_lost(now)
-                    if wizard is not None:
-                        # no shots while calibrating; the crosshair marks where to aim
-                        x, y = FIT_POINTS.get(wizard.key, (0.5, 0.5)) if wizard.gun is gun else (0.5, 0.5)
-                        buttons = 0
-                        gun.out = None
-                    else:
-                        (x, y), buttons = gun.output(now), gun.buttons(now)
-                sent[i] = (x, y, buttons)
-                sock.sendto(f"LG {gun.player} {round(x * 10000)} {round(y * 10000)} {buttons}".encode(), dest)
+            try:
+                for i, gun in enumerate(guns):
+                    with gun.lock:
+                        x, y, buttons = frame_for(gun, wizard, now)
+                    sent[i] = (x, y, buttons)
+                    sock.sendto(f"LG {gun.player} {round(x * 10000)} {round(y * 10000)} {buttons}".encode(), dest)
+            except Exception:
+                # a bad tick shouldn't silence the guns for good: note it and carry on
+                with open(HERE / "crash.log", "a") as f:
+                    f.write(f"--- {time.strftime('%H:%M:%S')} (sender)\n{traceback.format_exc()}")
             nxt += period
             if time.perf_counter() - nxt > 0.1:
                 nxt = time.perf_counter()     # fell behind (sleep, debugger): don't burst
             stop.wait(max(nxt - time.perf_counter(), 0.0))
 
-    threading.Thread(target=sender, daemon=True).start()
+    sender_thread = threading.Thread(target=sender, daemon=True)
+    sender_thread.start()
     last_stamp, t0, last_ms = 0.0, time.perf_counter(), -1
     fps_t, fps_n, fps = time.perf_counter(), 0, 0.0
     status_t = 0.0
@@ -1159,7 +1524,10 @@ def main():
                   "hand_x", "hand_y", "angle_x", "angle_y", "barrel_x", "barrel_y",
                   "t_hand_x", "t_hand_y", "t_angle_x", "t_angle_y", "fingers", "reach_middle", "reach_ring", "reach_pinky", "smooth_x", "smooth_y"]
                  + [f"lm{i}_{a}" for i in LOG_POINTS for a in "xyz"] + ["bend_middle", "bend_ring", "bend_pinky", "trig_pose", "open_level", "open_steep",
-                    "trig_event", "armed", "mark"])
+                    "trig_event", "armed", "mark"]
+                 # appended later (older analysis scripts keep working):
+                 + ["player", "seen_now", "split_x", "spare_hands", "proc_ms", "calibrated", "starts", "start_ev",
+                    "tu_fist", "tu_curled", "tu_up", "curl_hold", "tu_back", "tu_reach", "tu_over", "tu_vert", "tu_ip"])
 
     print(__doc__)
     try:
@@ -1172,22 +1540,30 @@ def main():
             now = time.perf_counter()
             # MediaPipe needs strictly increasing timestamps; two frames can land in one millisecond.
             last_ms = max(int((stamp - t0) * 1000), last_ms + 1)
+            proc_ms = math.nan
             try:
                 rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                t_det = time.perf_counter()
                 result = landmarker.detect_for_video(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb), last_ms)
-                # Two players: the left hand on screen is P1, the right one P2 (mirrored view).
-                found = sorted(zip(result.hand_landmarks, result.hand_world_landmarks),
-                               key=lambda pair: 1 - pair[0][INDEX_MCP].x)
-                for gun, (lm, wl) in zip(guns, found):
-                    with gun.lock:
-                        gun.update(lm, wl, now)
+                proc_ms = (time.perf_counter() - t_det) * 1000
+                found = list(zip(result.hand_landmarks, result.hand_world_landmarks))
+                # whose hand is which (two players: left in the preview is P1)
+                mine, fresh, spare = assign(found, now)
+                for gun, hand, new in zip(guns, mine, fresh):
+                    gun.start_blocked = wizard is not None
+                    gun.aspect = frame.shape[0] / frame.shape[1]
+                    if hand is not None:
+                        with gun.lock:
+                            if new:
+                                gun.handover(now)
+                            gun.update(hand[0], hand[1], now)
                 if wizard is not None:
-                    wizard.update(now, visible=len(found) > 0)
+                    wizard.update(now, visible=mine[wizard.gun.player] is not None)
             except Exception:
                 # One bad frame shouldn't end the game: note it and carry on.
                 with open(HERE / "crash.log", "a") as f:
                     f.write(f"--- {time.strftime('%H:%M:%S')}\n{traceback.format_exc()}")
-                found = []
+                found, mine, spare = [], [None] * len(guns), []
 
             for gun, (x, y, buttons) in zip(guns, sent):
                 sig = lambda k: gun.signals.get(k, (math.nan, math.nan))
@@ -1200,14 +1576,21 @@ def main():
                              + [f"{v:.4f}" for v in gun.screen] + [f"{v:.5f}" for v in gun.raw]
                              + [f"{v:.3f}" for v in gun.bend]
                              + [int(gun.trigger.pose == "steep"), f"{gun.trigger.levels['level'] or 0:.2f}",
-                                f"{gun.trigger.levels['steep'] or 0:.2f}", gun.trigger.event,
-                                int(gun.trigger.pending is not None), int(mark)])
+                                f"{gun.trigger.levels['steep'] or 0:.2f}",
+                                gun.trigger.event if mine[gun.player] is not None else "",
+                                int(gun.trigger.pending is not None), int(mark)]
+                             + [gun.player + 1, int(mine[gun.player] is not None), f"{assign.split:.3f}", assign.spare,
+                                f"{proc_ms:.1f}", int(gun.calibrated), gun.starts, f"{gun.start.evidence:.2f}"]
+                             + [int(v) for v in gun.tu_parts] + [int(gun.curl_hold)]
+                             + [f"{v:.3f}" for v in gun.tu])
 
             if now - status_t >= 0.5:
                 status_t = now
                 session.flush()
                 status = {"time": round(now - t0, 1), "fps": round(fps, 1), "hands": len(found),
-                          "wizard": wizard.key if wizard else None, "guns": [
+                          "players": len(guns), "split": round(assign.split, 3), "selected": sel + 1,
+                          "wizard": wizard.key if wizard else None,
+                          "wizard_player": wizard.gun.player + 1 if wizard else None, "guns": [
                     {"mode": g.mode, "seen_ago": round(now - g.seen, 2),
                      "target": [round(float(v), 3) for v in g.target], "screen": [round(float(v), 3) for v in g.screen],
                      "ranges": {m: [round(float(v), 4) for v in g.ranges[m]] for m in MODES},
@@ -1215,7 +1598,10 @@ def main():
                      "fire_below_cm": round(float(g.trigger.threshold()), 2), "pitch_deg": round(g.pitch_deg, 1),
                      "pressed": bool(g.pressed), "reload": bool(g.offscreen),
                      "trigger_pose": g.trigger.pose, "open_level_cm": round(float(g.trigger.levels["level"] or 0), 2),
-                     "open_steep_cm": round(float(g.trigger.levels["steep"] or 0), 2)} for g in guns]}
+                     "open_steep_cm": round(float(g.trigger.levels["steep"] or 0), 2),
+                     "player": g.player + 1, "calibrated": g.calibrated, "seen_now": mine[g.player] is not None,
+                     "starts": g.starts, "start_evidence": round(g.start.evidence, 2), "curl_hold": g.curl_hold}
+                    for g in guns]}
                 try:
                     (HERE / "status.json").write_text(json.dumps(status))
                 except OSError:
@@ -1225,29 +1611,44 @@ def main():
             if now - fps_t >= 1.0:
                 fps, fps_n, fps_t = fps_n / (now - fps_t), 0, now
             if not args.no_preview:
-                shown = draw(frame, guns, [lm for lm, _ in found], wizard, fps)
+                shown = draw(frame, guns, mine, spare, wizard, fps, assign.split, sel)
                 if mark:
                     put(shown, "MARKER AAN (x)", (10, 56), 0.6, (255, 0, 255), 2)
                 cv2.imshow("finger guns", shown)
             if wizard is not None and wizard.finished:
-                wizard = None
+                # two players (K): the next one's turn
+                wizard = Wizard(queue.pop(0)) if queue else None
 
             key = cv2.waitKey(1) & 0xFF
-            g = guns[0]
+            g = guns[sel]
             if wizard is not None:
                 if key == 27:
-                    wizard = None
+                    wizard, queue = None, []
                 elif key == ord(" "):
-                    wizard.update(now, visible=len(found) > 0, force=True)
+                    wizard.update(now, visible=mine[wizard.gun.player] is not None, force=True)
                 continue
             if key in (ord("q"), 27):
                 break
-            if key == ord("k"):
-                wizard = Wizard(g)
+            if key in (ord("1"), ord("2")):
+                sel = min(key - ord("1"), len(guns) - 1)
+            elif key == ord("k"):
+                wizard, queue = Wizard(g), []
+            elif key == ord("K"):
+                wizard, queue = Wizard(guns[0]), list(guns[1:])
             elif key == ord("c"):
                 with g.lock:
                     g.recenter(now)
                 g.calibrated = True
+            elif key == ord("C"):
+                for gg in guns:
+                    if now - gg.seen < 0.25:
+                        with gg.lock:
+                            gg.recenter(now)
+                        gg.calibrated = True
+                        save_settings(gg)
+            elif key in (ord("s"), ord("S")):
+                with g.lock:
+                    g.start.until = now + START_PULSE
             elif key == ord("["):
                 g.scale_range(1.1)
             elif key == ord("]"):
@@ -1256,6 +1657,9 @@ def main():
                 g.trigger.ratio = min(g.trigger.ratio + 0.04, 0.9)
             elif key == ord("g"):
                 g.trigger.ratio = max(g.trigger.ratio - 0.04, 0.3)
+            elif key == ord("i"):
+                # DirectShow opens the driver's property page; it runs on its own
+                cam.cap.set(cv2.CAP_PROP_SETTINGS, 1)
             elif key == ord("x"):
                 mark = not mark
             elif key == ord("m"):
@@ -1266,6 +1670,11 @@ def main():
                 save_settings(g)
     finally:
         stop.set()
+        sender_thread.join(0.5)
+        # let go of every button and park the crosshairs off-screen, so nothing stays held
+        # or drawn in Flycast (P1's mouse takes port A back on its next move)
+        for gun in guns:
+            sock.sendto(f"LG {gun.player} {round(OFF * 10000)} {round(OFF * 10000)} 0".encode(), dest)
         session.close()
         cam.close()
         cv2.destroyAllWindows()

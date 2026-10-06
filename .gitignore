@@ -25,6 +25,7 @@ CMakeUserPresets.json
 build-win/
 hotd2-vr/fingergun/.venv/
 hotd2-vr/fingergun/settings.json
+hotd2-vr/fingergun/settings_2p_*.json
 hotd2-vr/fingergun/session.csv
 hotd2-vr/fingergun/status.json
 hotd2-vr/fingergun/crash.log
