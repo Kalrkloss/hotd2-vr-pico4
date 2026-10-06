@@ -20,9 +20,6 @@
 */
 #include <chrono>
 #include <thread>
-#ifdef __ANDROID__
-#include <dlfcn.h>
-#endif
 #include "egl.h"
 
 #ifdef USE_EGL
@@ -64,17 +61,6 @@ bool EGLGraphicsContext::init()
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		version = gladLoaderLoadEGL(EGL_NO_DISPLAY);
 	}
-#ifdef __ANDROID__
-	if (version == 0 || eglGetDisplay == nullptr || eglInitialize == nullptr)
-	{
-		// Temporary diagnostics for the first-launch failure on the Quest
-		void *handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
-		ERROR_LOG(RENDERER, "EGL load failed: version %d, dlopen libEGL.so %s (%s), eglGetDisplay %p eglInitialize %p",
-				version, handle ? "ok" : "failed", handle ? "" : dlerror(), (void *)eglGetDisplay, (void *)eglInitialize);
-		if (handle)
-			dlclose(handle);
-	}
-#endif
 	if (version == 0 || eglGetDisplay == nullptr || eglInitialize == nullptr) {
 		ERROR_LOG(RENDERER, "Failed to load libEGL.so");
 		return false;

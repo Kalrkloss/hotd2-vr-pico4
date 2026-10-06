@@ -236,7 +236,8 @@ const ReprojectParams& update(const rend_context& ctx)
 	params.tanHalf = halfSize / gameFocal;
 	params.overlay = glm::vec4(stockTan, (float)config::VrHudDepth, (float)config::VrHudW);
 
-	if (frameCount++ % 120 == 0)
+	// depth statistics now and then, for tuning a new game on the PC (not in the headset)
+	if (frameCount++ % 120 == 0 && !xr::enabled())
 		logSceneStats(ctx, gameFocal);
 
 	if (const xr::Eye *eye = xr::currentEye())

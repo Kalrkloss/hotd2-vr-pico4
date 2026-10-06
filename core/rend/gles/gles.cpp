@@ -14,7 +14,6 @@
 #include "oslib/i18n.h"
 #include "rend/vr_reproject.h"
 #include "rend/vr/xr_host.h"
-#include "hw/pvr/Renderer_if.h"
 
 #ifdef TEST_AUTOMATION
 #include "cfg/cfg.h"
@@ -1440,35 +1439,8 @@ void OpenGLRenderer::Term()
 	gles_term();
 }
 
-// Temporary diagnostics: what kind of frames arrive, and which get shown
-extern u32 fb_w_cur;
-static int vrDiagScreen, vrDiagRtt, vrDiagFb, vrDiagMaxVerts, vrDiagShownFrames, vrDiagShownFb;
-static void vrDiag()
-{
-	static auto last = std::chrono::steady_clock::now();
-	const auto now = std::chrono::steady_clock::now();
-	if (now - last < std::chrono::seconds(2))
-		return;
-	last = now;
-	NOTICE_LOG(RENDERER, "VR frames/2s: screen %d (max verts %d) rtt %d framebuffer %d; shown: frames %d framebuffers %d",
-			vrDiagScreen, vrDiagMaxVerts, vrDiagRtt, vrDiagFb, vrDiagShownFrames, vrDiagShownFb);
-	NOTICE_LOG(RENDERER, "VR video: FB_R_SOF1 %06x FB_W_SOF1 %07x fb_w_cur %07x fb_enable %d blank %d fb_dirty %d",
-			FB_R_SOF1, FB_W_SOF1, fb_w_cur, FB_R_CTRL.fb_enable, VO_CONTROL.blank_video, fb_dirty);
-	if (vrFrameValid && !vrFrame.global_param_op.empty() && !vrFrame.verts.empty())
-	{
-		const PolyParam& bg = vrFrame.global_param_op[0];
-		const Vertex& v = vrFrame.verts[0];
-		NOTICE_LOG(RENDERER, "VR shown frame: %d verts, %d op polys; background textured %d tcw %08x tsp %08x isp %08x colour %d,%d,%d,%d",
-				(int)vrFrame.verts.size(), (int)vrFrame.global_param_op.size(), bg.pcw.Texture, bg.tcw.full, bg.tsp.full, bg.isp.full,
-				v.col[0], v.col[1], v.col[2], v.col[3]);
-	}
-	vrDiagScreen = vrDiagRtt = vrDiagFb = vrDiagMaxVerts = vrDiagShownFrames = vrDiagShownFb = 0;
-}
-
 void gles_vr_note_framebuffer(bool blank)
 {
-	vrDiagFb++;
-	vrDiag();
 	vrPendingKind = VrPending::Framebuffer;
 	vrPendingBlank = blank;
 }
@@ -1483,12 +1455,10 @@ void gles_vr_present()
 		std::swap(vrFrame, vrPending);
 		vrFrameValid = true;
 		vrShowFramebuffer = false;
-		vrDiagShownFrames++;
 		break;
 	case VrPending::Framebuffer:
 		vrShowFramebuffer = true;
 		vrFramebufferBlank = vrPendingBlank;
-		vrDiagShownFb++;
 		break;
 	case VrPending::None:
 		return;
@@ -1597,17 +1567,6 @@ void OpenGLRenderer::RenderVrEye(int width, int height)
 
 bool OpenGLRenderer::Render()
 {
-	if (vr::xr::enabled())
-	{
-		if (gl.rendContext->isRTT)
-			vrDiagRtt++;
-		else
-		{
-			vrDiagScreen++;
-			vrDiagMaxVerts = std::max(vrDiagMaxVerts, (int)gl.rendContext->verts.size());
-		}
-		vrDiag();
-	}
 	if (vr::xr::enabled() && !gl.rendContext->isRTT && !config::EmulateFramebuffer)
 	{
 		// shown from the next Present on (gles_vr_present)
