@@ -473,6 +473,7 @@ extern Option<bool> VrShowGun;
 extern Option<float> VrComfortStart;
 extern Option<float> VrComfortMin;
 extern Option<bool> VrAimWidened;
+extern Option<bool> VrWidenFov;
 extern Option<bool> CustomTextures;
 extern Option<bool> PreloadCustomTextures;
 extern Option<bool> DumpTextures;

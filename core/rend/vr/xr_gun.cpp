@@ -16,6 +16,7 @@
 
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <vector>
 
@@ -46,7 +47,7 @@ const PartMaterial Materials[] = {
 // The model, on the GPU
 GLuint modelVbo, modelIbo;
 GLuint modelProgram;
-GLint mMvp = -1, mModel = -1, mEye = -1, mColor = -1, mSpecular = -1, mShininess = -1, mEmissive = -1;
+GLint mMvp = -1, mModel = -1, mEye = -1, mColor = -1, mSpecular = -1, mShininess = -1, mEmissive = -1, mLight = -1;
 
 // Glowing bits (aim line, dot, muzzle flash): client-side, a few quads
 struct GlowVertex
@@ -56,7 +57,27 @@ struct GlowVertex
 	glm::vec2 corner;	// spots: -1..1 across, for the round falloff
 };
 GLuint glowProgram;
-GLint gMvp = -1, gSpot = -1;
+GLint gMvp = -1, gShape = -1, gStarAngle = -1;
+enum Shape { Line, Dot, Star, Flame, Smoke };
+
+// Gun smoke: a few puffs left in the room at each shot, drifting up and fading.
+struct Puff
+{
+	glm::vec3 pos;
+	glm::vec3 vel;
+	double born;
+	float size;
+};
+std::vector<Puff> smoke;
+unsigned lastShot;
+
+// A cheap deterministic random number in 0..1 for shot n, stream k.
+float shotRandom(unsigned n, unsigned k)
+{
+	unsigned h = n * 747796405u + k * 2891336453u + 0x9E3779B9u;
+	h ^= h >> 16; h *= 0x7feb352du; h ^= h >> 15; h *= 0x846ca68bu; h ^= h >> 16;
+	return (h & 0xffffff) / float(0x1000000);
+}
 
 bool initModel()
 {
@@ -84,6 +105,7 @@ uniform mediump vec3 baseColor;
 uniform mediump float specular;
 uniform mediump float shininess;
 uniform mediump vec3 emissive;
+uniform highp vec4 muzzleLight;	// room position, strength
 in highp vec3 vtx_pos;
 in highp vec3 vtx_normal;
 void main()
@@ -105,6 +127,14 @@ void main()
 			+ vec3(highlight)
 			+ rim * (0.18 * baseColor + 0.10 * specular)
 			+ emissive;
+	// the muzzle flash lights up the front of the gun
+	if (muzzleLight.w > 0.0)
+	{
+		highp vec3 toFlash = muzzleLight.xyz - vtx_pos;
+		highp float fd = length(toFlash);
+		mediump float lit = muzzleLight.w * max(dot(n, toFlash / fd), 0.15) / (1.0 + fd * fd * 600.0);
+		color += (baseColor * 2.2 + 0.25) * vec3(1.0, 0.62, 0.28) * lit;
+	}
 	gl_FragColor = vec4(color, 1.0);
 }
 )");
@@ -118,6 +148,7 @@ void main()
 	mSpecular = glGetUniformLocation(modelProgram, "specular");
 	mShininess = glGetUniformLocation(modelProgram, "shininess");
 	mEmissive = glGetUniformLocation(modelProgram, "emissive");
+	mLight = glGetUniformLocation(modelProgram, "muzzleLight");
 
 	// interleaved position, normal
 	std::vector<float> verts(gunmodel::VertexCount * 6);
@@ -162,14 +193,31 @@ void main()
 )");
 	OpenGlSource fragment;
 	fragment.addSource(PixelCompatShader).addSource(R"(
-uniform lowp float spot;
+uniform lowp float shape;		// 0 line, 1 dot, 2 star burst, 3 flame, 4 smoke
+uniform highp float starAngle;
 in lowp vec4 vtx_color;
 in highp vec2 vtx_corner;
 void main()
 {
-	lowp float a = vtx_color.a;
-	if (spot > 0.5)
-		a *= 1.0 - smoothstep(0.25, 1.0, length(vtx_corner));
+	mediump float a = vtx_color.a;
+	highp float r = length(vtx_corner);
+	if (shape > 3.5)
+		a *= 1.0 - smoothstep(0.0, 1.0, r);			// soft round puff
+	else if (shape > 2.5)
+	{
+		// along the barrel: x 0..1 from the muzzle out, y -1..1 across
+		highp float along = clamp(vtx_corner.x, 0.0, 1.0);
+		a *= pow(1.0 - along, 1.6) * (1.0 - vtx_corner.y * vtx_corner.y);
+	}
+	else if (shape > 1.5)
+	{
+		// six rays around a white-hot core
+		highp float ang = atan(vtx_corner.y, vtx_corner.x) + starAngle;
+		highp float rays = pow(abs(cos(ang * 3.0)), 10.0);
+		a *= clamp((1.0 - r) * (0.25 + 1.6 * rays) + (1.0 - smoothstep(0.0, 0.4, r)), 0.0, 1.0);
+	}
+	else if (shape > 0.5)
+		a *= 1.0 - smoothstep(0.25, 1.0, r);
 	gl_FragColor = vec4(vtx_color.rgb, a);
 }
 )");
@@ -177,17 +225,19 @@ void main()
 	if (glowProgram == 0)
 		return false;
 	gMvp = glGetUniformLocation(glowProgram, "mvp");
-	gSpot = glGetUniformLocation(glowProgram, "spot");
+	gShape = glGetUniformLocation(glowProgram, "shape");
+	gStarAngle = glGetUniformLocation(glowProgram, "starAngle");
 	return true;
 }
 
-void drawModel(const glm::mat4& viewProj, const glm::vec3& eyePos, const glm::mat4& pose)
+void drawModel(const glm::mat4& viewProj, const glm::vec3& eyePos, const glm::mat4& pose, const glm::vec4& muzzleLight)
 {
 	glcache.UseProgram(modelProgram);
 	const glm::mat4 mvp = viewProj * pose;
 	glUniformMatrix4fv(mMvp, 1, GL_FALSE, &mvp[0][0]);
 	glUniformMatrix4fv(mModel, 1, GL_FALSE, &pose[0][0]);
 	glUniform3f(mEye, eyePos.x, eyePos.y, eyePos.z);
+	glUniform4f(mLight, muzzleLight.x, muzzleLight.y, muzzleLight.z, muzzleLight.w);
 	glBindBuffer(GL_ARRAY_BUFFER, modelVbo);
 	glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, modelIbo);
 	glVertexAttribPointer(VERTEX_POS_ARRAY, 3, GL_FLOAT, GL_FALSE, 6 * sizeof(float), (const void *)0);
@@ -237,12 +287,68 @@ void billboard(std::vector<GlowVertex>& out, const glm::vec3& center, const glm:
 		out.push_back(v);
 }
 
+
+// A quad along the barrel from the muzzle forward, turned to face the eye: corner x runs
+// 0..1 from the muzzle out, y -1..1 across.
+void flame(std::vector<GlowVertex>& out, const glm::vec3& from, const glm::vec3& fwd, float length, float width,
+		const glm::vec3& eyePos, const glm::vec4& color)
+{
+	glm::vec3 side = glm::cross(fwd, eyePos - from);
+	side = glm::length(side) < 1e-6f ? glm::vec3(width, 0, 0) : glm::normalize(side) * width;
+	const glm::vec3 to = from + fwd * length;
+	const GlowVertex a { from - side, color, { 0, -1 } }, b { from + side, color, { 0, 1 } };
+	const GlowVertex c { to + side, color, { 1, 1 } }, d { to - side, color, { 1, -1 } };
+	for (const GlowVertex& v : { a, b, c, a, c, d })
+		out.push_back(v);
+}
+
+void drawGlowShape(Shape shape, const std::vector<GlowVertex>& verts)
+{
+	if (verts.empty())
+		return;
+	glUniform1f(gShape, (float)shape);
+	drawGlow(verts);
+}
+
 }	// namespace
+
+float gunKick(float sinceShot)
+{
+	if (sinceShot < 0.f || sinceShot > 0.4f)
+		return 0.f;
+	// a damped spring: up to full kick at once, a small bounce back past rest at about
+	// 0.11 s, settled by 0.4 s
+	return std::exp(-sinceShot / 0.06f) * std::cos(sinceShot * (6.2831853f / 0.22f));
+}
 
 void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& gun)
 {
 	if (!initModel() || !initGlow())
 		return;
+
+	const glm::vec3 muzzle = glm::vec3(gun.pose * glm::vec4(GunMuzzle, 1.f));
+	const glm::vec3 forward = glm::normalize(glm::vec3(gun.pose * glm::vec4(0.f, 0.f, -1.f, 0.f)));
+	// Muzzle flash: full for two headset frames, then gone in another 50 ms.
+	const float flash = gun.sinceShot < 0.f ? 0.f
+			: gun.sinceShot < 0.028f ? 1.f
+			: std::max(0.f, 1.f - (gun.sinceShot - 0.028f) / 0.05f);
+
+	// A new shot leaves smoke at the muzzle, drifting out of the barrel and upward.
+	if (gun.shot != lastShot)
+	{
+		lastShot = gun.shot;
+		for (unsigned k = 0; k < 3; k++)
+		{
+			const float spread = shotRandom(gun.shot, k) - 0.5f;
+			const glm::vec3 up(0.f, 1.f, 0.f);
+			smoke.push_back({ muzzle + forward * (0.01f + 0.02f * k),
+					forward * (0.18f + 0.1f * k) + up * (0.05f + 0.04f * spread) + glm::vec3(spread * 0.04f, 0.f, 0.f),
+					gun.now, 0.018f + 0.006f * k });
+		}
+		if (smoke.size() > 36)
+			smoke.erase(smoke.begin(), smoke.begin() + (smoke.size() - 36));
+	}
+	smoke.erase(std::remove_if(smoke.begin(), smoke.end(), [&](const Puff& p) { return gun.now - p.born > 0.9; }), smoke.end());
 
 	// The gun is in the player's hand, in front of anything in the game: draw it over the
 	// image with its own depth test only.
@@ -258,14 +364,16 @@ void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& 
 	glColorMask(GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE);
 	GlVertexArray::unbind();
 
-	drawModel(viewProj, eyePos, gun.pose);
+	drawModel(viewProj, eyePos, gun.pose, glm::vec4(muzzle + forward * 0.02f, flash * 1.4f));
 
-	// Glowing bits, in room space, added on top. The line is hidden by the gun where it
-	// passes behind it; the round spots (flash, dot) are always seen.
-	static std::vector<GlowVertex> line, spots;
+	// Glowing bits, in room space, on top. The gun hides what passes behind it, except
+	// the aim dot, which always shows.
+	static std::vector<GlowVertex> line, smokeVerts, flames, stars, dots;
 	line.clear();
-	spots.clear();
-	const glm::vec3 muzzle = glm::vec3(gun.pose * glm::vec4(GunMuzzle, 1.f));
+	smokeVerts.clear();
+	flames.clear();
+	stars.clear();
+	dots.clear();
 	if (gun.aimLine)
 	{
 		const glm::vec3 dir = gun.aimPoint - muzzle;
@@ -284,33 +392,51 @@ void drawGun(const glm::mat4& viewProj, const glm::vec3& eyePos, const GunView& 
 				line.push_back(v);
 		}
 	}
-	if (gun.flash > 0.f)
+	for (const Puff& p : smoke)
 	{
-		const float size = 0.025f + 0.03f * gun.flash;
-		const glm::vec3 at = glm::vec3(gun.pose * glm::vec4(GunMuzzle + glm::vec3(0, 0, -0.02f), 1.f));
-		billboard(spots, at, eyePos, size, glm::vec4(1.f, 0.75f, 0.3f, gun.flash));
-		billboard(spots, at, eyePos, size * 0.45f, glm::vec4(1.f, 1.f, 0.85f, gun.flash));
+		const float age = (float)(gun.now - p.born);
+		const float t = age / 0.9f;
+		// slows down as it spreads; grows, then thins out
+		const glm::vec3 at = p.pos + p.vel * (0.35f * (1.f - std::exp(-age / 0.35f))) + glm::vec3(0.f, 0.03f * age, 0.f);
+		const float alpha = 0.22f * std::min(1.f, age / 0.06f) * (1.f - t) * (1.f - t);
+		billboard(smokeVerts, at, eyePos, p.size * (1.f + 3.5f * t), glm::vec4(0.62f, 0.6f, 0.58f, alpha));
+	}
+	if (flash > 0.f)
+	{
+		// a tongue of fire out of the barrel, and a star burst with a white-hot core
+		const float reach = 0.07f + 0.06f * shotRandom(gun.shot, 7);
+		flame(flames, muzzle, forward, reach * (0.6f + 0.4f * flash), 0.016f, eyePos, glm::vec4(1.f, 0.55f, 0.15f, flash));
+		flame(flames, muzzle, forward, reach * 0.55f, 0.007f, eyePos, glm::vec4(1.f, 0.95f, 0.75f, flash));
+		const glm::vec3 at = muzzle + forward * 0.012f;
+		billboard(stars, at, eyePos, 0.035f + 0.02f * flash, glm::vec4(1.f, 0.7f, 0.25f, flash));
+		billboard(stars, at, eyePos, 0.016f, glm::vec4(1.f, 1.f, 0.9f, flash));
 	}
 	if (gun.aimDot)
 	{
 		// about 0.6 degrees across wherever it lands
 		const float size = glm::length(gun.aimPoint - eyePos) * 0.0055f;
-		billboard(spots, gun.aimPoint, eyePos, size, glm::vec4(1.f, 0.12f, 0.06f, 0.95f));
-		billboard(spots, gun.aimPoint, eyePos, size * 0.4f, glm::vec4(1.f, 0.85f, 0.7f, 1.f));
+		billboard(dots, gun.aimPoint, eyePos, size, glm::vec4(1.f, 0.12f, 0.06f, 0.95f));
+		billboard(dots, gun.aimPoint, eyePos, size * 0.4f, glm::vec4(1.f, 0.85f, 0.7f, 1.f));
 	}
+
 	glcache.UseProgram(glowProgram);
 	glUniformMatrix4fv(gMvp, 1, GL_FALSE, &viewProj[0][0]);
-	glcache.Enable(GL_BLEND);
-	glcache.BlendFunc(GL_SRC_ALPHA, GL_ONE);
-	glcache.DepthMask(GL_FALSE);
+	glUniform1f(gStarAngle, 6.2831853f * shotRandom(gun.shot, 3));
 	glEnableVertexAttribArray(VERTEX_POS_ARRAY);
 	glEnableVertexAttribArray(VERTEX_COL_BASE_ARRAY);
 	glEnableVertexAttribArray(VERTEX_UV_ARRAY);
-	glUniform1f(gSpot, 0.f);
-	drawGlow(line);
-	glUniform1f(gSpot, 1.f);
+	glcache.Enable(GL_BLEND);
+	glcache.DepthMask(GL_FALSE);
+	// smoke: see-through grey
+	glcache.BlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+	drawGlowShape(Smoke, smokeVerts);
+	// light: added on top
+	glcache.BlendFunc(GL_SRC_ALPHA, GL_ONE);
+	drawGlowShape(Line, line);
+	drawGlowShape(Flame, flames);
+	drawGlowShape(Star, stars);
 	glcache.Disable(GL_DEPTH_TEST);
-	drawGlow(spots);
+	drawGlowShape(Dot, dots);
 	glDisableVertexAttribArray(VERTEX_POS_ARRAY);
 	glDisableVertexAttribArray(VERTEX_COL_BASE_ARRAY);
 	glDisableVertexAttribArray(VERTEX_UV_ARRAY);
@@ -330,8 +456,10 @@ void termGun()
 		glDeleteBuffers(1, &modelIbo);
 	modelProgram = glowProgram = 0;
 	modelVbo = modelIbo = 0;
-	mMvp = mModel = mEye = mColor = mSpecular = mShininess = mEmissive = -1;
-	gMvp = gSpot = -1;
+	mMvp = mModel = mEye = mColor = mSpecular = mShininess = mEmissive = mLight = -1;
+	gMvp = gShape = gStarAngle = -1;
+	smoke.clear();
+	lastShot = 0;
 }
 
 }

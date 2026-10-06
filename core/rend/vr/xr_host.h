@@ -31,6 +31,9 @@ bool enabled();
 bool frame();
 // The eye being drawn right now, or nullptr outside an eye pass.
 const Eye *currentEye();
+// Where the last shot hit the game screen (0..1), for a short while after it (the game
+// draws its flash and hole there). False when there was none lately.
+bool recentShot(glm::vec2& screen);
 // The render context is going away (app in the background, renderer restart): drop the
 // session bound to it. The next frame() starts a new one on the new context.
 void term();
@@ -39,6 +42,7 @@ inline bool enabled() { return false; }
 inline bool frame() { return false; }
 inline const Eye *currentEye() { return nullptr; }
 inline void term() {}
+inline bool recentShot(glm::vec2&) { return false; }
 #endif
 
 }

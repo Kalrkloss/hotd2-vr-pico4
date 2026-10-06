@@ -33,7 +33,14 @@ struct ReprojectParams
 	// Comfort zone in the headset (see comfortScale): metres per game unit, distance the
 	// pull-back starts at, closest distance (metres). All 0 when off.
 	glm::vec3 comfort { 0.f };
+	// The last shot, while the game may be drawing its 2D effects for it: screen ndc
+	// (x, y), radius (z), active (w).
+	glm::vec4 shot { 0.f };
 };
+
+// The game's own field of view is widened (its code patched, see vr_reproject.cpp): it
+// then also tests light gun hits with the wide view.
+bool widensGameFov();
 
 // The comfort zone's parameters for the headset (vr.WorldScale, vr.ComfortStart,
 // vr.ComfortMin), or zero when it is switched off.

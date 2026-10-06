@@ -23,11 +23,17 @@ struct GunView
 {
 	glm::mat4 pose { 1.f };		// gun space -> room space, recoil included
 	float trigger = 0.f;		// 0..1, how far the trigger is pulled
-	float flash = 0.f;			// 0..1, muzzle flash
+	double now = 0.0;			// seconds, any steady clock (smoke drifts with it)
+	float sinceShot = 1e9f;		// seconds since the last shot
+	unsigned shot = 0;			// counts shots: each looks a bit different
 	bool aimLine = false;		// draw the line from the muzzle to the aim point
 	bool aimDot = false;		// draw the dot at the aim point
 	glm::vec3 aimPoint { 0.f };	// room space
 };
+
+// How hard the gun kicks back, sinceShot seconds after a shot: a sharp kick, a small
+// bounce forward, settled after about a quarter second. 0..1, can go slightly negative.
+float gunKick(float sinceShot);
 
 // Draws the gun into the bound eye framebuffer, on top of the game image.
 // viewProj: room space -> this eye's clip space; eyePos: the eye, in room space.

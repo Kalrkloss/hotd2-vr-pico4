@@ -103,6 +103,9 @@ bool triggerWas, recenterWas;
 GunView gunView;
 bool gunVisible;
 XrTime lastShot;
+unsigned shotCount;
+glm::vec2 lastShotScreen;
+XrTime lastFrameTime;
 
 bool check(XrResult result, const char *what)
 {
@@ -655,7 +658,9 @@ bool aimAtScene(const rend_context& ctx, const glm::vec3& o, const glm::vec3& d,
 	// own shot flash showed up). So the hit point goes on the screen at the stock framing:
 	// the shot lands where the dot is, and outside the stock view is off screen, as in
 	// the original game.
-	const glm::vec2 tan = config::VrAimWidened ? cam.tanHalf : cam.dcSize * 0.5f / (float)config::VrFocal;
+	// With the game's own field of view widened (widensGameFov) its hit test sees what it
+	// draws, so the hit point goes on the screen with the live view.
+	const glm::vec2 tan = config::VrAimWidened || widensGameFov() ? cam.tanHalf : cam.dcSize * 0.5f / (float)config::VrFocal;
 	screen = glm::vec2(hit.x / (-hit.z * tan.x), hit.y / (-hit.z * tan.y)) * 0.5f + 0.5f;
 	return onGameScreen(screen);
 }
@@ -694,9 +699,9 @@ void recoil()
 	info.action = hapticAction;
 	info.subactionPath = handPaths[gunHand];
 	XrHapticVibration vibration { XR_TYPE_HAPTIC_VIBRATION };
-	vibration.duration = 40'000'000;	// 40 ms
+	vibration.duration = 30'000'000;	// 30 ms: a sharp knock
 	vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
-	vibration.amplitude = 0.8f;
+	vibration.amplitude = 1.f;
 	xrApplyHapticFeedback(session, &info, (const XrHapticBaseHeader *)&vibration);
 }
 
@@ -830,19 +835,29 @@ void updateLightgun(XrTime time)
 		else if (ctx != nullptr)
 			onScreen = aimAtScene(*ctx, og, dg, screen, dist);
 
-		// Recoil: back and muzzle up around the hand, settling in about a tenth of a second.
-		// A shot fired now shows its flash and kick in this very frame.
+		// Recoil: back and muzzle up around the hand, with a small bounce (gunKick) and a
+		// little sideways twist that differs per shot. A shot fired now shows its flash
+		// and kick in this very frame.
 		if (trigger && !triggerWas && onScreen)
+		{
 			lastShot = time;
-		const float sinceShot = lastShot != 0 ? (time - lastShot) * 1e-9f : 1.f;
-		const float kick = sinceShot >= 0.f && sinceShot < 0.4f ? std::exp(-sinceShot / 0.055f) : 0.f;
+			shotCount++;
+			lastShotScreen = screen;
+		}
+		lastFrameTime = time;
+		const float sinceShot = lastShot != 0 ? (time - lastShot) * 1e-9f : 1e9f;
+		const float kick = gunKick(sinceShot);
+		const float twist = ((shotCount * 2654435761u) >> 24) / 255.f - 0.5f;	// -0.5..0.5 per shot
 		const glm::vec3 hand(0.f, -0.06f, 0.06f);
-		glm::mat4 recoilMat = glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, 0.03f * kick) + hand);
-		recoilMat = glm::rotate(recoilMat, glm::radians(16.f * kick), glm::vec3(1, 0, 0));
+		glm::mat4 recoilMat = glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, 0.035f * kick) + hand);
+		recoilMat = glm::rotate(recoilMat, glm::radians(18.f * kick), glm::vec3(1, 0, 0));
+		recoilMat = glm::rotate(recoilMat, glm::radians(6.f * twist * std::max(kick, 0.f)), glm::vec3(0, 1, 0));
 		recoilMat = glm::translate(recoilMat, -hand);
 		gunView.pose = pose * recoilMat;
 		gunView.trigger = std::clamp(pull, 0.f, 1.f);
-		gunView.flash = sinceShot >= 0.f && sinceShot < 0.06f ? 1.f - sinceShot / 0.06f : 0.f;
+		gunView.now = time * 1e-9;
+		gunView.sinceShot = sinceShot;
+		gunView.shot = shotCount;
 		gunView.aimLine = config::VrLaser;
 		gunView.aimDot = config::VrLaser && onScreen;
 		gunView.aimPoint = o + d * (dist > 0.f ? dist * s : 5.f);
@@ -973,6 +988,14 @@ bool enabled()
 const Eye *currentEye()
 {
 	return drawingEye ? &eye : nullptr;
+}
+
+bool recentShot(glm::vec2& screen)
+{
+	if (lastShot == 0 || lastFrameTime - lastShot > 400'000'000)	// 0.4 s
+		return false;
+	screen = lastShotScreen;
+	return true;
 }
 
 void term()

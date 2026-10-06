@@ -105,6 +105,7 @@ Option<bool> VrShowGun("vr.ShowGun", true);	// a pistol in the right hand
 Option<float> VrComfortStart("vr.ComfortStart", 0.8f);	// metres; closer things get pulled back (0: off)
 Option<float> VrComfortMin("vr.ComfortMin", 0.4f);	// metres; ...but never closer than this
 Option<bool> VrAimWidened("vr.AimWidened", false);	// the game's gun hit test follows its widened view
+Option<bool> VrWidenFov("vr.WidenFov", true);	// widen through the game's field of view when its profile knows where
 Option<bool> CustomTextures("rend.CustomTextures");
 Option<bool> PreloadCustomTextures("rend.PreloadCustomTextures");
 Option<bool> DumpTextures("rend.DumpTextures");

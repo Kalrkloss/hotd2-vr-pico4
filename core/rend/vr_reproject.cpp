@@ -14,6 +14,7 @@
 #include "log/Log.h"
 #include <glm/gtc/matrix_transform.hpp>
 #include <algorithm>
+#include <iterator>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -66,13 +67,35 @@ static glm::vec2 readGameFocal()
 }
 
 //
-// Widening the game's view: scale down the viewport matrix's x/y terms by vr.FovScale.
-// The game then maps (and culls against the screen) a wider cone into the same 640x480.
-// The projection can't be used for this: the game rebuilds it every frame. The viewport
-// is set once per scene, so it is checked every vblank: a value differing from what we
-// last wrote is fresh from the game and gets scaled; our own value is left alone.
+// Widening the game's view, two ways.
+//
+// Best: the field of view the game builds its projection from. HOTD2 passes it as a
+// 16-bit angle (65536 = a full turn) from a few literals in its code; raised there, the
+// game itself draws, culls and tests light gun hits with the wider view. Checked every
+// vblank, since the code is loaded after the game starts. See GameProfile::fovLiterals.
+//
+// Otherwise: scale down the viewport matrix's x/y terms by vr.FovScale. The game then
+// maps (and culls against the screen) a wider cone into the same 640x480, but anything
+// it computes for the screen on its own, like the light gun hit test, keeps the stock
+// view. The projection itself can't be scaled: the game rebuilds it every frame. The
+// viewport is set once per scene, so it is checked every vblank: a value differing from
+// what we last wrote is fresh from the game and gets scaled; our own value is left alone.
 //
 static glm::vec2 lastWritten;
+static u32 fovLiterals[4];		// RAM offsets of the game's field of view angle (0: none)
+static u16 fovStock;			// the angle the game ships with
+
+// The angle (65536 = full turn) that widens stock by `scale` (as tan of the half angle).
+static u16 widenedAngle(u16 stock, float scale)
+{
+	const float half = stock * (3.14159265f / 65536.f);
+	const float wide = 2.f * std::atan(std::tan(half) * scale);
+	return (u16)std::lround(wide * (65536.f / 6.2831853f));
+}
+
+bool widensGameFov() {
+	return fovLiterals[0] != 0;
+}
 
 static void widenGameView(Event event, void *)
 {
@@ -82,7 +105,26 @@ static void widenGameView(Event event, void *)
 		return;
 	}
 	const float scale = config::VrFovScale;
-	if (!config::VrReproject || scale <= 1.f || config::VrViewportAddr <= 0)
+	if (!config::VrReproject || scale <= 1.f)
+		return;
+	if (widensGameFov())
+	{
+		const u16 wide = widenedAngle(fovStock, scale);
+		for (u32 offset : fovLiterals)
+		{
+			if (offset == 0)
+				break;
+			const u32 addr = 0x8C000000u + offset;
+			// only the stock value: anything else isn't the code we know (not loaded yet)
+			if (ReadMem16_nommu(addr) == fovStock)
+			{
+				WriteMem16_nommu(addr, wide);
+				NOTICE_LOG(RENDERER, "VR: field of view %.1f -> %.1f degrees at %08x", fovStock * 360.f / 65536.f, wide * 360.f / 65536.f, addr);
+			}
+		}
+		return;
+	}
+	if (config::VrViewportAddr <= 0)
 		return;
 	const u32 addr = config::VrViewportAddr;
 	const glm::vec2 cur(readFloat(addr + ScaleX), readFloat(addr + ScaleY));
@@ -91,9 +133,6 @@ static void widenGameView(Event event, void *)
 	lastWritten = cur / scale;
 	writeFloat(addr + ScaleX, lastWritten.x);
 	writeFloat(addr + ScaleY, lastWritten.y);
-	static int logged;
-	if (logged++ < 20)	// temporary: when does the widening kick in
-		NOTICE_LOG(RENDERER, "VR: widened viewport %g x %g -> %g x %g", cur.x, cur.y, lastWritten.x, lastWritten.y);
 }
 
 static struct WidenGameViewRegistration
@@ -134,13 +173,19 @@ struct GameProfile
 	const char *gameId;
 	int projAddr, viewportAddr;
 	float fovScale;
+	// Where the game's code holds its field of view (16-bit angle literals), and its value.
+	u32 fovLiterals[4];
+	u16 fovStock;
 };
 static const GameProfile profiles[] = {
-	{ "MK-5100250", 0x4C65E0, 0x4C6708, 2.f },	// The House of the Dead 2 (PAL)
+	// The House of the Dead 2 (PAL). Its four perspective setups (0x8C029B48, 0x8C02B2C6,
+	// 0x8C02B30A, 0x8C02B34E) load 41.1 degrees from two literals and call 0x8C0383C0.
+	{ "MK-5100250", 0x4C65E0, 0x4C6708, 2.f, { 0x029C12, 0x02B370 }, 7484 },
 };
 
 static void applyGameProfile(Event, void *)
 {
+	std::fill(std::begin(fovLiterals), std::end(fovLiterals), 0u);
 	if (xr::enabled())
 	{
 		// Everything the headset view depends on.
@@ -157,6 +202,11 @@ static void applyGameProfile(Event, void *)
 			config::VrViewportAddr.override(prof.viewportAddr);
 		if (xr::enabled() && config::VrWiden && config::VrFovScale <= 1.f)
 			config::VrFovScale.override(prof.fovScale);
+		if (config::VrWidenFov)
+		{
+			std::copy(std::begin(prof.fovLiterals), std::end(prof.fovLiterals), std::begin(fovLiterals));
+			fovStock = prof.fovStock;
+		}
 		if (xr::enabled() && config::VrXrGun && config::MapleMainDevices[0] != MDT_LightGun)
 		{
 			// The right controller is a light gun: plug one into port A (a pad ignores
@@ -217,6 +267,7 @@ const ReprojectParams& update(const rend_context& ctx)
 	const glm::vec2 halfSize(dcWidth * 0.5f, dcHeight * 0.5f);
 	const bool active = config::VrReproject && !ctx.isRTT;
 	params.comfort = glm::vec3(0.f);
+	params.shot = glm::vec4(0.f);
 
 	const float zMax = ctx.fZ_max > 0.f && std::isfinite(ctx.fZ_max) ? ctx.fZ_max : 1.f;
 	const float zNear = NearFraction / zMax;
@@ -245,6 +296,9 @@ const ReprojectParams& update(const rend_context& ctx)
 		// In the headset: game camera at the player's head, viewed through this eye.
 		params.viewProj = eye->viewProj;
 		params.comfort = comfortParams();
+		glm::vec2 shot;
+		if (widensGameFov() && xr::recentShot(shot))
+			params.shot = glm::vec4(shot * 2.f - 1.f, 0.2f, 1.f);
 		return params;
 	}
 
