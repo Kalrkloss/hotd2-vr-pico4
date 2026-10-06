@@ -1,3 +1,4 @@
+// hotd2-vr: modified in 2026 by mikermak for the Quest VR mode (see "git log master..hotd2-vr").
 #include "maple_devs.h"
 #include "maple_cfg.h"
 #include "maple_helper.h"

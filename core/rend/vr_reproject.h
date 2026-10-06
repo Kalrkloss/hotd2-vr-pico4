@@ -11,7 +11,7 @@
 	fixed depth in front of the game camera instead, keeping their original on-screen
 	size. Opaque black overlay is the cinematic letterbox and can be hidden.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #pragma once
 #include <glm/glm.hpp>

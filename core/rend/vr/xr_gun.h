@@ -6,7 +6,7 @@
 	Room space here is the headset's local space relative to the game camera's origin
 	(metres, y up), the same space the eye views are built in.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #pragma once
 #include <glm/glm.hpp>

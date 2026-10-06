@@ -1,3 +1,4 @@
+// hotd2-vr: modified in 2026 by mikermak for the Quest VR mode (see "git log master..hotd2-vr").
 /*
 	Copyright 2021 flyinghead
 
@@ -95,13 +96,13 @@ Option<bool> VrAnimate("vr.Animate");		// sway the free camera by the amplitudes
 Option<int> VrUdpPort("vr.UdpPort", 0);	// lightgun input over UDP on 127.0.0.1, 0 = off
 // Headset (OpenXR builds only)
 Option<bool> VrXr("vr.Xr", true);			// immersive view in the headset
-Option<bool> VrXrGun("vr.XrGun", true);		// right controller drives the light gun
+Option<bool> VrXrGun("vr.XrGun", true);		// the controllers drive the light gun (the one that fires holds it)
 Option<bool> VrWiden("vr.Widen", true);		// let the game profile widen the view (vr.FovScale)
 Option<float> VrWorldScale("vr.WorldScale", 0.025f);	// metres per game unit
 Option<float> VrXrResolution("vr.XrResolution", 1.f);	// eye buffer size, times the recommended size
 Option<int> VrXrRefreshRate("vr.XrRefreshRate", 72);	// Hz
 Option<bool> VrLaser("vr.Laser", true);		// aim line and dot from the gun
-Option<bool> VrShowGun("vr.ShowGun", true);	// a pistol in the right hand
+Option<bool> VrShowGun("vr.ShowGun", true);	// a gun in the shooting hand
 Option<float> VrComfortStart("vr.ComfortStart", 0.8f);	// metres; closer things get pulled back (0: off)
 Option<float> VrComfortMin("vr.ComfortMin", 0.4f);	// metres; ...but never closer than this
 Option<bool> VrAimWidened("vr.AimWidened", false);	// the game's gun hit test follows its widened view

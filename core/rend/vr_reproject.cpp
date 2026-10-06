@@ -1,7 +1,7 @@
 /*
 	VR reprojection prototype (hotd2-vr). See vr_reproject.h.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #include "vr_reproject.h"
 #include "vr/xr_host.h"

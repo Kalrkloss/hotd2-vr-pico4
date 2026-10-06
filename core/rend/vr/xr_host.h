@@ -6,7 +6,7 @@
 	latest one once per eye with the reprojection from rend/vr_reproject.h, so head
 	movement is tracked at the display rate. The right controller is the light gun.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #pragma once
 #include <glm/glm.hpp>

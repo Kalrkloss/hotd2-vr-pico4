@@ -3,11 +3,11 @@
 
 	The model is a Namco arcade light gun in glossy red plastic: "Namco Arcade Gun" by
 	Martoscar (https://sketchfab.com/3d-models/namco-arcade-gun-15fbd5b9add94a34b5c21746e3dd32be),
-	CC BY 4.0, baked into gun_model.h by tools/gun_model/convert_gun.py. It is lit per pixel
+	CC BY 4.0, baked into gun_model.h by hotd2-vr/gun_model/convert_gun.py. It is lit per pixel
 	by a fixed key light and a dim fill from below, with a plastic highlight and rim, so it
 	reads as a solid object in the game's dark scenes.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #include "xr_gun.h"
 #include "gun_model.h"

@@ -13,7 +13,7 @@
 	buttons: bit 0 trigger, bit 1 reload (off-screen shot), bit 2 start, bits 3-6 the gun's
 	D-pad (up, down, left, right), bit 7 its B button.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #include "udp_lightgun.h"
 #include "types.h"

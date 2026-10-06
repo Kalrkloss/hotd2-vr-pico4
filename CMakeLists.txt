@@ -1,3 +1,4 @@
+# hotd2-vr: modified in 2026 by mikermak for the Quest VR mode (see "git log master..hotd2-vr").
 if(APPLE AND NOT LIBRETRO)
 	# Requirement from SDL
 	# Minimum version for $<LINK_LIBRARY:feature,library-list>

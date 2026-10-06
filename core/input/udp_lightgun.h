@@ -1,7 +1,7 @@
 /*
 	Lightgun input over UDP (hotd2-vr). See udp_lightgun.cpp.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #pragma once
 

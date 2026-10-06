@@ -9,7 +9,7 @@
 	eye-space positions (game units, renderer y convention: y down) map to the headset's
 	local space (metres, y up) by a uniform scale (vr.WorldScale) and a y flip.
 
-	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
 #include "xr_host.h"
 

@@ -1,3 +1,4 @@
+// hotd2-vr: modified in 2026 by mikermak for the Quest VR mode (see "git log master..hotd2-vr").
 #include "rend/vr/xr_host.h"
 #include "glcache.h"
 #include "gles.h"
