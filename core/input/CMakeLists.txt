@@ -12,5 +12,7 @@ if(NOT LIBRETRO)
             mapping.cpp
             mapping.h
             mouse.cpp
-            mouse.h)
+            mouse.h
+            udp_lightgun.cpp
+            udp_lightgun.h)
 endif()

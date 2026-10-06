@@ -76,6 +76,35 @@ Option<bool> ModifierVolumes("rend.ModifierVolumes", true);
 Option<int> TextureUpscale("rend.TextureUpscale2", 1);
 Option<int> MaxFilteredTextureSize("rend.MaxFilteredTextureSize", 256);
 Option<float> ExtraDepthScale("rend.ExtraDepthScale", 1.f);
+Option<bool> VrReproject("vr.Reproject");
+Option<float> VrFocal("vr.Focal", 640.f);	// the game's stock focal length, in DC pixels
+// Where the game keeps its camera, as RAM offsets (0 = unknown, use vr.Focal):
+// the projection matrix (rebuilt every frame) and the viewport matrix (set once).
+Option<int> VrProjAddr("vr.ProjAddr", 0);
+Option<int> VrViewportAddr("vr.ViewportAddr", 0);
+Option<float> VrFovScale("vr.FovScale", 1.f);	// widen the game's view by this factor (tan of the half angle)
+Option<float> VrHudW("vr.HudW", 1.f);		// the W the game draws its 2D overlay at (sprites, text, letterbox)
+Option<bool> VrHideLetterbox("vr.HideLetterbox", true);	// drop opaque black overlay (cinematic bars)
+Option<float> VrHudDepth("vr.HudDepth", 40.f);	// game units in front of the game camera
+Option<float> VrYaw("vr.Yaw", 0.f);			// degrees
+Option<float> VrPitch("vr.Pitch", 0.f);		// degrees
+Option<float> VrOffsetX("vr.OffsetX", 0.f);	// game units
+Option<float> VrOffsetY("vr.OffsetY", 0.f);
+Option<float> VrOffsetZ("vr.OffsetZ", 0.f);
+Option<bool> VrAnimate("vr.Animate");		// sway the free camera by the amplitudes above
+Option<int> VrUdpPort("vr.UdpPort", 0);	// lightgun input over UDP on 127.0.0.1, 0 = off
+// Headset (OpenXR builds only)
+Option<bool> VrXr("vr.Xr", true);			// immersive view in the headset
+Option<bool> VrXrGun("vr.XrGun", true);		// right controller drives the light gun
+Option<bool> VrWiden("vr.Widen", true);		// let the game profile widen the view (vr.FovScale)
+Option<float> VrWorldScale("vr.WorldScale", 0.025f);	// metres per game unit
+Option<float> VrXrResolution("vr.XrResolution", 1.f);	// eye buffer size, times the recommended size
+Option<int> VrXrRefreshRate("vr.XrRefreshRate", 72);	// Hz
+Option<bool> VrLaser("vr.Laser", true);		// aim line and dot from the gun
+Option<bool> VrShowGun("vr.ShowGun", true);	// a pistol in the right hand
+Option<float> VrComfortStart("vr.ComfortStart", 0.8f);	// metres; closer things get pulled back (0: off)
+Option<float> VrComfortMin("vr.ComfortMin", 0.4f);	// metres; ...but never closer than this
+Option<bool> VrAimWidened("vr.AimWidened", false);	// the game's gun hit test follows its widened view
 Option<bool> CustomTextures("rend.CustomTextures");
 Option<bool> PreloadCustomTextures("rend.PreloadCustomTextures");
 Option<bool> DumpTextures("rend.DumpTextures");

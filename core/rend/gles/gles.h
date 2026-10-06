@@ -58,6 +58,10 @@ struct PipelineShader
 	GLint trilinear_alpha;
 	GLint fog_clamp_min, fog_clamp_max;
 	GLint ndcMat;
+	GLint vrMat;
+	GLint vrTan;
+	GLint vrOverlay;
+	GLint vrComfort;
 	GLint palette_index;
 	GLint ditherDivisor;
 	GLint texSize;
@@ -233,6 +237,10 @@ struct gl_ctx
 		GLint depth_scale;
 		GLint sp_ShaderColor;
 		GLint ndcMat;
+		GLint vrMat;
+		GLint vrTan;
+		GLint vrOverlay;
+		GLint vrComfort;
 	} modvol_shader;
 
 	struct
@@ -392,6 +400,15 @@ PipelineShader *GetProgram(bool cp_AlphaTest, bool pp_InsideClipping,
 
 GLuint gl_CompileShader(const char* shader, GLuint type);
 GLuint gl_CompileAndLink(const char *vertexShader, const char *fragmentShader);
+// hotd2-vr: the frame kept for the headset (the one on screen), drawn once per eye
+bool gles_vr_have_frame();
+void gles_vr_note_framebuffer(bool blank);
+// the game shows the last rendered frame now: it goes to the headset
+void gles_vr_present();
+bool gles_vr_showing_framebuffer();
+void gles_vr_draw_eye(int width, int height);
+const rend_context *gles_vr_frame();
+
 bool CompilePipelineShader(PipelineShader* s);
 extern const char* GouraudSource;
 
@@ -405,6 +422,10 @@ extern struct ShaderUniforms_t
 	float fog_clamp_min[4];
 	float fog_clamp_max[4];
 	glm::mat4 ndcMat;
+	glm::mat4 vrMat;
+	glm::vec2 vrTan;
+	glm::vec4 vrOverlay;
+	glm::vec3 vrComfort;	// world scale, comfort start, comfort minimum (metres); 0: off
 	struct {
 		bool enabled;
 		int x;
@@ -439,6 +460,14 @@ extern struct ShaderUniforms_t
 
 		if (s->ndcMat != -1)
 			glUniformMatrix4fv(s->ndcMat, 1, GL_FALSE, &ndcMat[0][0]);
+		if (s->vrMat != -1)
+			glUniformMatrix4fv(s->vrMat, 1, GL_FALSE, &vrMat[0][0]);
+		if (s->vrTan != -1)
+			glUniform2fv(s->vrTan, 1, &vrTan[0]);
+		if (s->vrOverlay != -1)
+			glUniform4fv(s->vrOverlay, 1, &vrOverlay[0]);
+		if (s->vrComfort != -1)
+			glUniform3fv(s->vrComfort, 1, &vrComfort[0]);
 
 		if (s->ditherDivisor != -1)
 			glUniform4fv(s->ditherDivisor, 1, ditherDivisor);
@@ -499,6 +528,8 @@ struct OpenGLRenderer : Renderer
 	void Process(TA_context* ctx) override;
 
 	bool Render() override;
+	// hotd2-vr: draw the kept frame into the current headset eye (vr::xr::currentEye())
+	void RenderVrEye(int width, int height);
 
 	void RenderFramebuffer(const FramebufferInfo& info) override;
 
@@ -520,6 +551,7 @@ struct OpenGLRenderer : Renderer
 	{
 		if (!frameRendered || clearLastFrame)
 			return false;
+		gles_vr_present();
 #ifndef LIBRETRO
 		imguiDriver->setFrameRendered();
 #endif

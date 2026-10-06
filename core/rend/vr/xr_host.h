@@ -1,0 +1,44 @@
+/*
+	OpenXR host (hotd2-vr): turns the Android build into an immersive Quest app.
+
+	The emulator keeps producing frames at the game's own rate. The render thread paces
+	itself on the headset instead (xrWaitFrame), lets those frames through, and draws the
+	latest one once per eye with the reprojection from rend/vr_reproject.h, so head
+	movement is tracked at the display rate. The right controller is the light gun.
+
+	This file is part of Flycast and is distributed under the GNU GPL v2 or later.
+*/
+#pragma once
+#include <glm/glm.hpp>
+
+namespace vr::xr
+{
+
+struct Eye
+{
+	unsigned fbo;
+	int width;
+	int height;
+	// Rebuilt game eye space (renderer y convention, game units) -> this eye's clip space.
+	glm::mat4 viewProj;
+};
+
+#ifdef USE_OPENXR
+// Built with OpenXR and switched on (vr.Xr).
+bool enabled();
+// One headset frame, called by the render thread in place of the usual wait-and-present.
+// Returns false when nothing was shown (session not running).
+bool frame();
+// The eye being drawn right now, or nullptr outside an eye pass.
+const Eye *currentEye();
+// The render context is going away (app in the background, renderer restart): drop the
+// session bound to it. The next frame() starts a new one on the new context.
+void term();
+#else
+inline bool enabled() { return false; }
+inline bool frame() { return false; }
+inline const Eye *currentEye() { return nullptr; }
+inline void term() {}
+#endif
+
+}

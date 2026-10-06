@@ -127,6 +127,22 @@ public:
 		return execute(dequeue(timeoutMs));
 	}
 
+	// hotd2-vr: run everything already queued, waiting at most firstWaitMs for the first
+	// message. Returns the number of messages run.
+	int drain(int firstWaitMs)
+	{
+		int count = 0;
+		for (int wait = firstWaitMs; ; wait = 0)
+		{
+			Message msg = dequeue(wait);
+			if (msg.type == NoMessage)
+				break;
+			execute(msg);
+			count++;
+		}
+		return count;
+	}
+
 	void reset() {
 		const lock_guard lock(mutex);
 		queue.clear();
@@ -294,6 +310,12 @@ bool rend_single_frame(const bool& enabled)
 		if (!pvrQueue.waitAndExecute(timeout))
 			return false;
 	return true;
+}
+
+int rend_vr_drain(int firstWaitMs)
+{
+	FC_PROFILE_SCOPE;
+	return pvrQueue.drain(firstWaitMs);
 }
 
 class SwapIntervalDetector

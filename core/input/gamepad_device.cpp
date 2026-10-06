@@ -18,6 +18,7 @@
  */
 
 #include "gamepad_device.h"
+#include "udp_lightgun.h"
 #include "cfg/cfg.h"
 #include "stdclass.h"
 #include "ui/gui.h"
@@ -454,10 +455,11 @@ bool GamepadDevice::gamepad_axis_input(u32 code, int value)
 			if (lastValue != v || lastOpValue != v)
 			{
 				lastValue = lastOpValue = v;
-				// Lightgun with left analog stick
-				if (key == DC_AXIS_RIGHT || key == DC_AXIS_LEFT)
+				// Lightgun with left analog stick, unless the UDP light gun is aiming
+				const bool aimByStick = !udpLightgunActive(port);
+				if (aimByStick && (key == DC_AXIS_RIGHT || key == DC_AXIS_LEFT))
 					mo_x_abs[port] = (std::abs(v) * axisDirection + 32768) * 639 / 65535;
-				else if (key == DC_AXIS_UP || key == DC_AXIS_DOWN)
+				else if (aimByStick && (key == DC_AXIS_UP || key == DC_AXIS_DOWN))
 					mo_y_abs[port] = (std::abs(v) * axisDirection + 32768) * 479 / 65535;
 			}
 			// Radial dead zone

@@ -1,3 +1,4 @@
+#include "rend/vr/xr_host.h"
 #include "glcache.h"
 #include "gles.h"
 #include "quad.h"
@@ -643,6 +644,8 @@ void DrawStrips()
 void OpenGLRenderer::RenderFramebuffer(const FramebufferInfo& info)
 {
 	gl.rendContext = nullptr;
+	if (vr::xr::enabled())
+		gles_vr_note_framebuffer(info.fb_r_ctrl.fb_enable == 0 || info.vo_control.blank_video == 1);
 	glReadFramebuffer(info);
 	saveCurrentFramebuffer();
 	initVideoRoutingFrameBuffer();

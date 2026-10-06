@@ -18,6 +18,11 @@
     You should have received a copy of the GNU General Public License
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
+#include <chrono>
+#include <thread>
+#ifdef __ANDROID__
+#include <dlfcn.h>
+#endif
 #include "egl.h"
 
 #ifdef USE_EGL
@@ -52,6 +57,24 @@ bool EGLGraphicsContext::makeCurrent()
 bool EGLGraphicsContext::init()
 {
 	int version = gladLoaderLoadEGL(EGL_NO_DISPLAY);
+	// hotd2-vr: on the Quest this sometimes fails right after the app starts; it works
+	// a moment later.
+	for (int attempt = 0; attempt < 20 && (version == 0 || eglGetDisplay == nullptr || eglInitialize == nullptr); attempt++)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(100));
+		version = gladLoaderLoadEGL(EGL_NO_DISPLAY);
+	}
+#ifdef __ANDROID__
+	if (version == 0 || eglGetDisplay == nullptr || eglInitialize == nullptr)
+	{
+		// Temporary diagnostics for the first-launch failure on the Quest
+		void *handle = dlopen("libEGL.so", RTLD_NOW | RTLD_LOCAL);
+		ERROR_LOG(RENDERER, "EGL load failed: version %d, dlopen libEGL.so %s (%s), eglGetDisplay %p eglInitialize %p",
+				version, handle ? "ok" : "failed", handle ? "" : dlerror(), (void *)eglGetDisplay, (void *)eglInitialize);
+		if (handle)
+			dlclose(handle);
+	}
+#endif
 	if (version == 0 || eglGetDisplay == nullptr || eglInitialize == nullptr) {
 		ERROR_LOG(RENDERER, "Failed to load libEGL.so");
 		return false;

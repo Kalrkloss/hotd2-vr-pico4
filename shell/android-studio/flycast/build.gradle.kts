@@ -19,7 +19,7 @@ android {
 
     defaultConfig {
         applicationId = "com.flycast.emulator"
-        minSdk = 21
+        minSdk = 29     // hotd2-vr: Quest only (the OpenXR loader needs 24+)
         targetSdk = 36
         versionCode = 8
         versionName = gitVersionName()
@@ -58,6 +58,24 @@ android {
             )
             signingConfig = signingConfigs.getByName("release")
         }
+        // hotd2-vr: optimised build for sideloading on the Quest, signed with the debug
+        // key and installed next to (never over) a regular Flycast.
+        create("vr") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            // run-as for copying games into app storage and reading logs
+            isDebuggable = true
+            // ...but a debuggable variant builds native code as Debug (-O0: ~20 fps).
+            // The last CMAKE_BUILD_TYPE on the command line wins.
+            externalNativeBuild {
+                cmake {
+                    arguments += "-DCMAKE_BUILD_TYPE=Release"
+                    arguments += "-DUSE_OPENXR=ON"
+                }
+            }
+            applicationIdSuffix = ".vr"
+            versionNameSuffix = "-vr"
+        }
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
@@ -68,6 +86,9 @@ android {
             path = file("../../../CMakeLists.txt")
             version = "3.22.1"
         }
+    }
+    buildFeatures {
+        prefab = true   // hotd2-vr: OpenXR loader headers and library for CMake
     }
     packaging {
         jniLibs {
@@ -89,6 +110,7 @@ dependencies {
     implementation(libs.slf4j.android)
     implementation(fileTree("libs") { include("*.aar", "*.jar") })
     implementation(libs.documentfile)
+    implementation("org.khronos.openxr:openxr_loader_for_android:1.1.43")
     testImplementation(libs.junit)
     androidTestImplementation(libs.espresso.core)
     androidTestImplementation(libs.ext.junit)

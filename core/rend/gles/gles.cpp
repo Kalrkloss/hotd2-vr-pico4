@@ -12,11 +12,15 @@
 #include "emulator.h"
 #include "naomi2.h"
 #include "oslib/i18n.h"
+#include "rend/vr_reproject.h"
+#include "rend/vr/xr_host.h"
+#include "hw/pvr/Renderer_if.h"
 
 #ifdef TEST_AUTOMATION
 #include "cfg/cfg.h"
 #endif
 
+#include <chrono>
 #include <cmath>
 #include <memory>
 
@@ -85,6 +89,12 @@ static const char* VertexShaderSource = R"(
 uniform highp vec4 depth_scale;
 uniform highp mat4 ndcMat;
 uniform highp float sp_FOG_DENSITY;
+#if VR_REPROJECT == 1
+uniform highp mat4 vrMat;
+uniform highp vec2 vrTan;
+uniform highp vec4 vrOverlay;
+uniform highp vec3 vrComfort;
+#endif
 
 /* Vertex input */
 in highp vec4 in_pos;
@@ -120,6 +130,40 @@ void main()
 		vtx_uv.xy *= vpos.z;
 		vpos.w = 1.0;
 		vpos.z = 0.0;
+	#endif
+	#if VR_REPROJECT == 1 && DIV_POS_Z == 1
+		// vpos is (ndc.x * W, ndc.y * W, W, W): lift it back to the game's eye space
+		// and view it from the VR camera. Depth keeps using the original W (vtx_uv.z).
+		if (abs(vpos.w - vrOverlay.w) < 0.002)
+		{
+			// 2D overlay: pin to a plane at a fixed depth, at its original on-screen size.
+			// Opaque black overlay is the cinematic letterbox: pushed out of view when hidden.
+			#if VR_HIDE_BLACK == 1
+			if (in_base.a > 0.99 && all(lessThan(in_base.rgb, vec3(0.01))))
+				vpos = vec4(2.0, 2.0, 0.0, 1.0);
+			else
+			#endif
+				vpos = vrMat * vec4(vpos.xy / vpos.w * vrOverlay.xy * vrOverlay.z, -vrOverlay.z, 1.0);
+		}
+		else
+		{
+			highp vec3 p = vec3(vpos.xy * vrTan, -vpos.w);
+			// Comfort: what comes closer than vrComfort.y metres in front of you (a zombie in
+			// your face) is pulled back along the line of sight, smoothly, to no closer than
+			// vrComfort.z. Only straight ahead: the floor at your feet stays where it is.
+			// Same as vr::comfortScale().
+			highp float len = length(p);
+			highp float d = len * vrComfort.x;
+			if (d > 0.0 && d < vrComfort.y)
+			{
+				highp float t = d / vrComfort.y;
+				highp float c = vrComfort.z / vrComfort.y;
+				highp float pull = vrComfort.y * (t + c * (1.0 - t) * (1.0 - t)) / d;
+				highp float ahead = smoothstep(0.55, 0.85, -p.z / len);
+				p *= mix(1.0, pull, ahead);
+			}
+			vpos = vrMat * vec4(p, 1.0);
+		}
 	#endif
 #endif
 	gl_Position = vpos;
@@ -765,6 +809,8 @@ public:
 	VertexSource(bool gouraud, bool divPosZ) : OpenGlSource() {
 		addConstant("pp_Gouraud", gouraud);
 		addConstant("DIV_POS_Z", divPosZ);
+		addConstant("VR_REPROJECT", divPosZ && config::VrReproject);
+		addConstant("VR_HIDE_BLACK", config::VrHideLetterbox);
 
 		addSource(VertexCompatShader);
 		addSource(GouraudSource);
@@ -860,6 +906,10 @@ bool CompilePipelineShader(PipelineShader* s)
 		s->fog_clamp_max = -1;
 	}
 	s->ndcMat = glGetUniformLocation(s->program, "ndcMat");
+	s->vrMat = glGetUniformLocation(s->program, "vrMat");
+	s->vrTan = glGetUniformLocation(s->program, "vrTan");
+	s->vrOverlay = glGetUniformLocation(s->program, "vrOverlay");
+	s->vrComfort = glGetUniformLocation(s->program, "vrComfort");
 	s->ditherDivisor = glGetUniformLocation(s->program, "ditherDivisor");
 	s->texSize = glGetUniformLocation(s->program, "texSize");
 
@@ -886,6 +936,10 @@ static void create_modvol_shader()
 
 	gl.modvol_shader.program = gl_CompileAndLink(vertexShader.generate().c_str(), fragmentShader.generate().c_str());
 	gl.modvol_shader.ndcMat = glGetUniformLocation(gl.modvol_shader.program, "ndcMat");
+	gl.modvol_shader.vrMat = glGetUniformLocation(gl.modvol_shader.program, "vrMat");
+	gl.modvol_shader.vrTan = glGetUniformLocation(gl.modvol_shader.program, "vrTan");
+	gl.modvol_shader.vrOverlay = glGetUniformLocation(gl.modvol_shader.program, "vrOverlay");
+	gl.modvol_shader.vrComfort = glGetUniformLocation(gl.modvol_shader.program, "vrComfort");
 	gl.modvol_shader.sp_ShaderColor = glGetUniformLocation(gl.modvol_shader.program, "sp_ShaderColor");
 	gl.modvol_shader.depth_scale = glGetUniformLocation(gl.modvol_shader.program, "depth_scale");
 
@@ -1059,6 +1113,25 @@ void OpenGLRenderer::drawOSD()
 #endif
 }
 
+// hotd2-vr: in the headset, screen frames aren't drawn when they arrive. A copy is kept
+// and drawn per eye at the headset's rate, so head movement shows between game frames.
+static rend_context vrFrame;
+static bool vrFrameValid;
+// Some screens (menus, notices) are drawn by the CPU straight into the framebuffer, not
+// by the 3D chip. Those are shown on a flat screen in front of the player.
+static bool vrShowFramebuffer;
+static bool vrFramebufferBlank;
+static GLuint vrScreenProgram;
+static GLint vrScreenMvp = -1;
+// What was rendered last, kept until the game puts it on screen (Present). Games also
+// render frames they never show.
+enum class VrPending { None, Frame, Framebuffer };
+static VrPending vrPendingKind;
+static rend_context vrPending;
+static bool vrPendingBlank;
+// Screen frames rendered since the last one was shown.
+static int vrFramesNotShown;
+
 void OpenGLRenderer::Process(TA_context* ctx)
 {
 	if (gl.gl_major < 3 && settings.platform.isNaomi2())
@@ -1067,8 +1140,16 @@ void OpenGLRenderer::Process(TA_context* ctx)
 	if (resetTextureCache) {
 		TexCache.Clear();
 		resetTextureCache = false;
+		// hotd2-vr: the kept frames' textures are gone
+		vrFrameValid = false;
+		if (vrPendingKind == VrPending::Frame)
+			vrPendingKind = VrPending::None;
 	}
-	TexCache.Cleanup();
+	// hotd2-vr: the headset keeps drawing the shown frame while later frames come and go.
+	// The cache drops textures overwritten 120 frames ago; hold off while the shown frame
+	// is getting that old, so it never points at a deleted texture.
+	if (!vr::xr::enabled() || vrFramesNotShown < 60)
+		TexCache.Cleanup();
 
 	if (updateFogTable && config::Fog) {
 		updateFogTable = false;
@@ -1118,6 +1199,13 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 
 	gl.matrices.CalcMatrices(gl.rendContext, width, height);
 	ShaderUniforms.ndcMat = gl.matrices.GetNormalMatrix();
+	{
+		const vr::ReprojectParams& vrParams = vr::update(*gl.rendContext);
+		ShaderUniforms.vrMat = vrParams.viewProj;
+		ShaderUniforms.vrTan = vrParams.tanHalf;
+		ShaderUniforms.vrOverlay = vrParams.overlay;
+		ShaderUniforms.vrComfort = vrParams.comfort;
+	}
 
 	ShaderUniforms.depth_coefs[0] = 2.f / vtx_max_fZ;
 	ShaderUniforms.depth_coefs[1] = -1.f;
@@ -1141,6 +1229,14 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 		if (gl.modvol_shader.depth_scale != -1)
 			glUniform4fv(gl.modvol_shader.depth_scale, 1, ShaderUniforms.depth_coefs);
 		glUniformMatrix4fv(gl.modvol_shader.ndcMat, 1, GL_FALSE, &ShaderUniforms.ndcMat[0][0]);
+		if (gl.modvol_shader.vrMat != -1)
+			glUniformMatrix4fv(gl.modvol_shader.vrMat, 1, GL_FALSE, &ShaderUniforms.vrMat[0][0]);
+		if (gl.modvol_shader.vrTan != -1)
+			glUniform2fv(gl.modvol_shader.vrTan, 1, &ShaderUniforms.vrTan[0]);
+		if (gl.modvol_shader.vrOverlay != -1)
+			glUniform4fv(gl.modvol_shader.vrOverlay, 1, &ShaderUniforms.vrOverlay[0]);
+		if (gl.modvol_shader.vrComfort != -1)
+			glUniform3fv(gl.modvol_shader.vrComfort, 1, &ShaderUniforms.vrComfort[0]);
 		glUniform1f(gl.modvol_shader.sp_ShaderColor, 1 - FPU_SHAD_SCALE.scale_factor / 256.f);
 
 		glcache.UseProgram(gl.n2ModVolShader.program);
@@ -1217,10 +1313,16 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 			glViewport(0, 0, width, height);
 		}
 #else
-		if (init_output_framebuffer(width, height) == 0)
+		if (const vr::xr::Eye *eye = vr::xr::currentEye())
+		{
+			glBindFramebuffer(GL_FRAMEBUFFER, eye->fbo);
+			glViewport(0, 0, eye->width, eye->height);
+		}
+		else if (init_output_framebuffer(width, height) == 0)
 			return false;
 #endif
 	}
+	const bool vrEye = !is_rtt && vr::xr::currentEye() != nullptr;
 
 	//Color is cleared by the background plane
 
@@ -1236,7 +1338,7 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 	else
 		glcache.ClearColor(0.f, 0.f, 0.f, 0.f);
 
-	if (is_rtt || gl.rendContext->clearFramebuffer)
+	if (is_rtt || gl.rendContext->clearFramebuffer || vrEye)
 		glClear(GL_COLOR_BUFFER_BIT);
 	//move vertex to gpu
 	//Main VBO
@@ -1267,13 +1369,22 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 		else
 			ShaderUniforms.base_clipping.enabled = false;
 	}
+	if (vrEye)
+		// the game's screen clip rectangle means nothing in a headset view
+		ShaderUniforms.base_clipping.enabled = false;
 	if (ShaderUniforms.base_clipping.enabled) {
 		glcache.Scissor(ShaderUniforms.base_clipping.x, ShaderUniforms.base_clipping.y,
 				ShaderUniforms.base_clipping.width, ShaderUniforms.base_clipping.height);
 		glcache.Enable(GL_SCISSOR_TEST);
 	}
 
+	// The eye projection flips y compared to the renderer's own convention, which flips
+	// the winding the cull modes were set up for.
+	if (vrEye)
+		glFrontFace(GL_CW);
 	DrawStrips();
+	if (vrEye)
+		glFrontFace(GL_CCW);
 #ifdef LIBRETRO
 	if (!is_rtt && !config::EmulateFramebuffer)
 		postProcessor.render(glsm_get_current_framebuffer());
@@ -1283,6 +1394,8 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 		ReadRTTBuffer();
 	else if (config::EmulateFramebuffer)
 		writeFramebufferToVRAM();
+	else if (vrEye)
+		;	// the eye image goes to the headset compositor
 	else {
 		gl.ofbo.aspectRatio = getOutputFramebufferAspectRatio();
 #ifndef LIBRETRO
@@ -1313,12 +1426,198 @@ void OpenGLRenderer::initVideoRoutingFrameBuffer()
 
 void OpenGLRenderer::Term()
 {
+	// the kept frames point into the texture cache, the screen program into this context
+	vrFrameValid = false;
+	vrShowFramebuffer = false;
+	vrPendingKind = VrPending::None;
+	if (vrScreenProgram != 0)
+	{
+		glcache.DeleteProgram(vrScreenProgram);
+		vrScreenProgram = 0;
+		vrScreenMvp = -1;
+	}
 	TexCache.Clear();
 	gles_term();
 }
 
+// Temporary diagnostics: what kind of frames arrive, and which get shown
+extern u32 fb_w_cur;
+static int vrDiagScreen, vrDiagRtt, vrDiagFb, vrDiagMaxVerts, vrDiagShownFrames, vrDiagShownFb;
+static void vrDiag()
+{
+	static auto last = std::chrono::steady_clock::now();
+	const auto now = std::chrono::steady_clock::now();
+	if (now - last < std::chrono::seconds(2))
+		return;
+	last = now;
+	NOTICE_LOG(RENDERER, "VR frames/2s: screen %d (max verts %d) rtt %d framebuffer %d; shown: frames %d framebuffers %d",
+			vrDiagScreen, vrDiagMaxVerts, vrDiagRtt, vrDiagFb, vrDiagShownFrames, vrDiagShownFb);
+	NOTICE_LOG(RENDERER, "VR video: FB_R_SOF1 %06x FB_W_SOF1 %07x fb_w_cur %07x fb_enable %d blank %d fb_dirty %d",
+			FB_R_SOF1, FB_W_SOF1, fb_w_cur, FB_R_CTRL.fb_enable, VO_CONTROL.blank_video, fb_dirty);
+	if (vrFrameValid && !vrFrame.global_param_op.empty() && !vrFrame.verts.empty())
+	{
+		const PolyParam& bg = vrFrame.global_param_op[0];
+		const Vertex& v = vrFrame.verts[0];
+		NOTICE_LOG(RENDERER, "VR shown frame: %d verts, %d op polys; background textured %d tcw %08x tsp %08x isp %08x colour %d,%d,%d,%d",
+				(int)vrFrame.verts.size(), (int)vrFrame.global_param_op.size(), bg.pcw.Texture, bg.tcw.full, bg.tsp.full, bg.isp.full,
+				v.col[0], v.col[1], v.col[2], v.col[3]);
+	}
+	vrDiagScreen = vrDiagRtt = vrDiagFb = vrDiagMaxVerts = vrDiagShownFrames = vrDiagShownFb = 0;
+}
+
+void gles_vr_note_framebuffer(bool blank)
+{
+	vrDiagFb++;
+	vrDiag();
+	vrPendingKind = VrPending::Framebuffer;
+	vrPendingBlank = blank;
+}
+
+void gles_vr_present()
+{
+	if (!vr::xr::enabled())
+		return;
+	switch (vrPendingKind)
+	{
+	case VrPending::Frame:
+		std::swap(vrFrame, vrPending);
+		vrFrameValid = true;
+		vrShowFramebuffer = false;
+		vrDiagShownFrames++;
+		break;
+	case VrPending::Framebuffer:
+		vrShowFramebuffer = true;
+		vrFramebufferBlank = vrPendingBlank;
+		vrDiagShownFb++;
+		break;
+	case VrPending::None:
+		return;
+	}
+	vrPendingKind = VrPending::None;
+	vrFramesNotShown = 0;
+}
+
+bool gles_vr_have_frame() {
+	return vrFrameValid || vrShowFramebuffer;
+}
+
+bool gles_vr_showing_framebuffer() {
+	return vrShowFramebuffer;
+}
+
+// The framebuffer image on a quad at the HUD depth, framed like the game's own view.
+static void drawVrScreen(const vr::xr::Eye& eye)
+{
+	GLuint& program = vrScreenProgram;
+	GLint& mvpLocation = vrScreenMvp;
+	glBindFramebuffer(GL_FRAMEBUFFER, eye.fbo);
+	glViewport(0, 0, eye.width, eye.height);
+	glcache.Disable(GL_SCISSOR_TEST);
+	glcache.ClearColor(0.f, 0.f, 0.f, 1.f);
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT | GL_STENCIL_BUFFER_BIT);
+	if (vrFramebufferBlank || gl.dcfb.tex == 0)
+		return;
+	if (program == 0)
+	{
+		OpenGlSource vertex;
+		vertex.addSource(VertexCompatShader).addSource(R"(
+in highp vec4 in_pos;
+in highp vec2 in_uv;
+uniform highp mat4 mvp;
+out highp vec2 vtx_uv;
+void main()
+{
+	vtx_uv = in_uv;
+	gl_Position = mvp * vec4(in_pos.xyz, 1.0);
+}
+)");
+		OpenGlSource fragment;
+		fragment.addSource(PixelCompatShader).addSource(R"(
+uniform sampler2D tex;
+in highp vec2 vtx_uv;
+void main()
+{
+	gl_FragColor = vec4(texture(tex, vtx_uv).rgb, 1.0);
+}
+)");
+		program = gl_CompileAndLink(vertex.generate().c_str(), fragment.generate().c_str());
+		mvpLocation = glGetUniformLocation(program, "mvp");
+		glcache.UseProgram(program);
+		glUniform1i(glGetUniformLocation(program, "tex"), 0);
+	}
+	const float d = config::VrHudDepth;
+	const float tx = 320.f / config::VrFocal * d, ty = 240.f / config::VrFocal * d;
+	// game eye space, renderer convention (y down): top of the image has negative y
+	const float quad[] {
+		-tx, -ty, -d,  0.f, 0.f,
+		 tx, -ty, -d,  1.f, 0.f,
+		-tx,  ty, -d,  0.f, 1.f,
+		 tx,  ty, -d,  1.f, 1.f,
+	};
+	glcache.UseProgram(program);
+	glUniformMatrix4fv(mvpLocation, 1, GL_FALSE, &eye.viewProj[0][0]);
+	glcache.Disable(GL_DEPTH_TEST);
+	glcache.Disable(GL_CULL_FACE);
+	glcache.Disable(GL_BLEND);
+	glActiveTexture(GL_TEXTURE0);
+	glcache.BindTexture(GL_TEXTURE_2D, gl.dcfb.tex);
+	GlVertexArray::unbind();
+	glBindBuffer(GL_ARRAY_BUFFER, 0);
+	glVertexAttribPointer(VERTEX_POS_ARRAY, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), quad);
+	glVertexAttribPointer(VERTEX_UV_ARRAY, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), quad + 3);
+	glEnableVertexAttribArray(VERTEX_POS_ARRAY);
+	glEnableVertexAttribArray(VERTEX_UV_ARRAY);
+	glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+	glDisableVertexAttribArray(VERTEX_POS_ARRAY);
+	glDisableVertexAttribArray(VERTEX_UV_ARRAY);
+}
+
+const rend_context *gles_vr_frame() {
+	return vrFrameValid ? &vrFrame : nullptr;
+}
+
+void gles_vr_draw_eye(int width, int height)
+{
+	if (renderer != nullptr && isOpenGL(config::RendererType))
+		static_cast<OpenGLRenderer *>(renderer)->RenderVrEye(width, height);
+}
+
+void OpenGLRenderer::RenderVrEye(int width, int height)
+{
+	if (vrShowFramebuffer)
+	{
+		drawVrScreen(*vr::xr::currentEye());
+		return;
+	}
+	if (!vrFrameValid)
+		return;
+	gl.rendContext = &vrFrame;
+	renderFrame(width, height);
+}
+
 bool OpenGLRenderer::Render()
 {
+	if (vr::xr::enabled())
+	{
+		if (gl.rendContext->isRTT)
+			vrDiagRtt++;
+		else
+		{
+			vrDiagScreen++;
+			vrDiagMaxVerts = std::max(vrDiagMaxVerts, (int)gl.rendContext->verts.size());
+		}
+		vrDiag();
+	}
+	if (vr::xr::enabled() && !gl.rendContext->isRTT && !config::EmulateFramebuffer)
+	{
+		// shown from the next Present on (gles_vr_present)
+		vrPending = *gl.rendContext;
+		vrPendingKind = VrPending::Frame;
+		vrFramesNotShown++;
+		frameRendered = true;
+		clearLastFrame = false;
+		return true;
+	}
 	saveCurrentFramebuffer();
 	renderFrame(gl.rendContext->framebufferWidth, gl.rendContext->framebufferHeight);
 	if (gl.rendContext->isRTT) {

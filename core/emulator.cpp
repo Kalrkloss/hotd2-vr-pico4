@@ -16,6 +16,7 @@
     You should have received a copy of the GNU General Public License
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
  */
+#include "rend/vr/xr_host.h"
 #include "emulator.h"
 #include "types.h"
 #include "stdclass.h"
@@ -1080,6 +1081,9 @@ bool Emulator::render()
 		return false;
 	if (state != Running)
 		return false;
+	if (vr::xr::enabled())
+		// paced by the headset, which also shows the frame (one view per eye)
+		return vr::xr::frame();
 	return rend_single_frame(true); // FIXME stop flag?
 }
 

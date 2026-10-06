@@ -157,6 +157,18 @@ public abstract class BaseGLActivity extends Activity implements ActivityCompat.
                     pendingIntentUrl = gameUri.toString();
             }
         }
+        else if (getPackageName().endsWith(".vr")) {
+            // hotd2-vr: started from the headset's app library. The Flycast menu can't be
+            // shown in the headset, so boot the game in the app's games folder directly.
+            String game = findVrGame();
+            Log.i("flycast", "VR build started without a game, booting " + game);
+            if (game != null) {
+                if (storagePermissionGranted)
+                    JNIdc.setGameUri(game);
+                else
+                    pendingIntentUrl = game;
+            }
+        }
         Log.i("flycast", "BaseGLActivity.onCreate done");
     }
 
@@ -181,6 +193,27 @@ public abstract class BaseGLActivity extends Activity implements ActivityCompat.
                 dlgAlert.create().show();
             }
         });
+    }
+
+    // hotd2-vr: the first disc image in files/games (internal, then external storage)
+    private String findVrGame()
+    {
+        List<File> dirs = new ArrayList<>();
+        dirs.add(new File(getFilesDir(), "games"));
+        File external = getExternalFilesDir(null);
+        if (external != null)
+            dirs.add(new File(external, "games"));
+        for (File dir : dirs) {
+            File[] files = dir.listFiles();
+            if (files == null)
+                continue;
+            java.util.Arrays.sort(files);
+            for (String ext : new String[] { ".cue", ".gdi", ".chd", ".cdi" })
+                for (File f : files)
+                    if (f.isFile() && f.length() > 0 && f.getName().toLowerCase(Locale.ROOT).endsWith(ext))
+                        return f.getAbsolutePath();
+        }
+        return null;
     }
 
     private void setStorageDirectories()

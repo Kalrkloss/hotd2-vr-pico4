@@ -13,6 +13,8 @@ void rend_start_render();
 int rend_end_render(int tag, int cycles, int jitter, void *arg);
 void rend_cancel_emu_wait();
 bool rend_single_frame(const bool& enabled);
+// hotd2-vr: run queued render messages without waiting for a present (headset-paced loop)
+int rend_vr_drain(int firstWaitMs);
 void rend_swap_frame(u32 fb_r_sof1);
 void rend_set_fb_write_addr(u32 fb_w_sof1);
 void rend_reset();

@@ -411,6 +411,9 @@ struct maple_sega_vmu: maple_base
 			ERROR_LOG(MAPLE, "Failed to write the VMU %s to disk", logical_port);
 			return false;
 		}
+		// hotd2-vr: Android kills apps instead of letting them exit; don't leave the last
+		// write in the stdio buffer
+		std::fflush(file);
 		fullSaveNeeded = false;
 		return true;
 	}
@@ -709,6 +712,11 @@ struct maple_sega_vmu: maple_base
 								ERROR_LOG(MAPLE, "Failed to save VMU %s: I/O error", logical_port);
 								return MDRE_FileError; // I/O error
 							}
+							else
+								// hotd2-vr: on disk now. Android kills apps instead of letting
+								// them exit, and a save whose last block (the FAT) is lost
+								// leaves HOTD2 hanging on a black screen at the next start.
+								std::fflush(file);
 						}
 						return MDRS_DeviceReply;
 					}

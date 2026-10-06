@@ -11,6 +11,8 @@ target_sources(${PROJECT_NAME} PRIVATE
         texconv.h
         transform_matrix.cpp
         transform_matrix.h
+        vr_reproject.cpp
+        vr_reproject.h
         norend/norend.cpp)
 
 if(USE_OPENGL)

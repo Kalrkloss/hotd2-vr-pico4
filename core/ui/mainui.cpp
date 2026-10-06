@@ -17,6 +17,7 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include "rend/vr/xr_host.h"
 #include "mainui.h"
 #include "hw/pvr/Renderer_if.h"
 #include "gui.h"
@@ -90,6 +91,8 @@ void mainui_init()
 
 void mainui_term()
 {
+	// hotd2-vr: the headset session is bound to the render context, which goes away next
+	vr::xr::term();
 	rend_term_renderer();
 }
 
@@ -105,7 +108,8 @@ void mainui_loop(bool forceStart)
 	{
 		fc_profiler::startThread("main");
 
-		if (mainui_rend_frame() && imguiDriver != nullptr)
+		// In the headset the frame went to the eye swapchains; the window isn't shown.
+		if (mainui_rend_frame() && imguiDriver != nullptr && !(vr::xr::enabled() && !gui_is_open()))
 		{
 			try {
 				imguiDriver->present();

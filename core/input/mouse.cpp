@@ -17,6 +17,7 @@
     along with Flycast.  If not, see <https://www.gnu.org/licenses/>.
 */
 #include "mouse.h"
+#include "udp_lightgun.h"
 #include "cfg/option.h"
 #include "ui/gui.h"
 
@@ -116,7 +117,7 @@ static void screenToNative(int& x, int& y, int width, int height)
 
 void SetMousePosition(int x, int y, int width, int height, u32 mouseId)
 {
-	if (mouseId >= std::size(mo_x_abs))
+	if (mouseId >= std::size(mo_x_abs) || udpLightgunActive(mouseId))
 		return;
 	mo_width = width;
 	mo_height = height;
@@ -144,7 +145,7 @@ void SetMousePosition(int x, int y, int width, int height, u32 mouseId)
 
 void SetRelativeMousePosition(float xrel, float yrel, u32 mouseId)
 {
-	if (mouseId >= std::size(mo_x_delta))
+	if (mouseId >= std::size(mo_x_delta) || udpLightgunActive(mouseId))
 		return;
 	int width = mo_width;
 	int height = mo_height;
