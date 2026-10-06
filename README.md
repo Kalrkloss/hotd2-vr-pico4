@@ -137,6 +137,12 @@ Settings live in `/sdcard/Android/data/com.flycast.emulator.vr/files/emu.cfg`, u
   and put MediaPipe's [hand landmarker model](https://ai.google.dev/edge/mediapipe/solutions/vision/hand_landmarker)
   (`hand_landmarker.task`) in `hotd2-vr\fingergun\`. Then `hotd2-vr\play-fingergun.ps1`
   (after `build-win.cmd`). It starts with a guided calibration; its on-screen text is in Dutch.
+  Aim with your index finger, fire by dropping your thumb, reload by opening your hand for
+  a moment (`--reload down` brings back the old point-the-gun-down reload). The
+  calibration (`K`) moves the game's crosshair to nine targets in turn; aim at each. Aiming
+  then follows where your hand is: a webcam in front of you can't tell which way a finger
+  points straight at it, so the finger's direction is left out. Press `C` while aiming at
+  the centre whenever you sit differently.
 - `hotd2-vr/gun_model`: bakes a `.glb` gun model into `gun_model.h`.
 - `hotd2-vr/re/sh4dis.py`: disassembles game code from a Flycast RAM dump (Capstone),
   which is how the field-of-view literals were found.
