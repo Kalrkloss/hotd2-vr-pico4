@@ -69,9 +69,9 @@ LOG_POINTS = (0, 5, 6, 8, 9, 13, 17, 4, 1, 2, 3, 7)
 
 BTN_TRIGGER, BTN_RELOAD, BTN_START = 1, 2, 4
 
-# Thumbs-up = Start. Start also pauses the game, so it must not go off by itself: on every
-# logged session (finger guns, also pointing at the camera, steep, reloading, resting) the
-# rule below never got past 0.09 s of its 0.5 s.
+# Thumbs-up = Start. Start also pauses the game, so it must not go off by itself: on the
+# logged sessions (finger guns, also pointing at the camera, steep, reloading, resting, two
+# players) the rule never got past 0.13 s of its 0.5 s outside a real thumbs-up.
 START_HOLD = 0.5        # s of thumbs-up evidence before Start
 START_PULSE = 0.15      # the Start bit is held this long (the game reads the gun every 20 ms)
 START_COOLDOWN = 2.0    # no new Start within this time, and only after the pose was let go
@@ -298,9 +298,9 @@ def thumbs_up_reading(lm, aspect=0.75):
     height / width) plus MediaPipe's relative depth z, distances in palm sizes. A finger gun
     holds its thumb up too (about half of all logged play frames), so the decision rests on
     the index finger: curled = its tip has come back nearer the wrist than its own middle
-    joint, and is less than a palm size from it. Logged finger guns, also pointing straight
-    at the camera, never met both (1st percentiles -0.06 and 1.10; a curled index reads
-    about -0.4 and 0.75). Returns (index curled, thumb up, the numbers).
+    joint (by 0.2 palm sizes; a real thumbs-up read -0.22..-0.38, finger guns 1st percentile
+    -0.12..-0.06), and isn't far out (tip within 1.6 palm sizes of the wrist; a real thumbs-up
+    read 1.24-1.60). Returns (index curled, thumb up, the numbers).
     """
     q = lambda i: np.array([lm[i].x, lm[i].y * aspect, lm[i].z])
     dist = lambda a, b: float(np.linalg.norm(q(a) - q(b)))
@@ -312,7 +312,7 @@ def thumbs_up_reading(lm, aspect=0.75):
     vx, vy = lm[4].x - lm[2].x, (lm[4].y - lm[2].y) * aspect
     vert = -vy / (math.hypot(vx, vy) + 1e-9)        # thumb MCP->tip: 1 = straight up on screen
     above_ip = (y(3) - y(4)) / palm                 # thumb tip above its own IP joint
-    curled = tip_back < -0.20 and reach < 1.00
+    curled = tip_back < -0.20 and reach < 1.60
     up = over > 0.30 and vert > 0.70 and above_ip > 0.05
     return curled, up, (tip_back, reach, over, vert, above_ip)
 
@@ -401,6 +401,7 @@ class Gun:
         self.start_blocked = False      # set while a calibration runs
         self.tu, self.tu_parts = (math.nan,) * 5, (False, False, False)    # fist, index in, thumb up
         self.curl_t0, self.curl_hold, self.curl_last = None, False, -10.0
+        self.curl_levels = {"level": None, "steep": None}
         self.pitch_deg = 0.0
         self.hand_y = 0.5
         self.target = np.array([0.5, 0.5])
@@ -535,7 +536,11 @@ class Gun:
             self.offscreen = self.hand_open
             self.curl_t0 = None
             return
-        if args.curl_hold == "on" and self.curl_step(fist and curled, now):
+        # Hold aim and trigger for a thumbs-up, or for a fist whose index is folded right in
+        # (the stricter test: the looser one alone also caught moments of finger-gun play and
+        # cost shots on the logs).
+        tight = self.tu[0] < -0.20 and self.tu[1] < 1.00
+        if args.curl_hold == "on" and self.curl_step(fist and (tight or (curled and up)), now, fist and tight):
             return
 
         # Gun direction in 3D (metres). The barrel blends wrist->fingertip (long, steady)
@@ -607,21 +612,25 @@ class Gun:
             self.ease_until = self.held_until + 0.15
         self.screen = self.held_pos if (self.held_pos is not None and now < self.held_until) else smoothed
 
-    def curl_step(self, curl, now):
+    def curl_step(self, curl, now, skip=True):
         """
         A fist with the index curled (thumbs-up, or just a fist) is not a finger gun: hold aim
         and trigger, so the raised thumb can't become the trigger's open level (a false shot
-        afterwards) and a resting fist can't shoot. One or two such frames inside a finger gun
-        are misreads: only skipped, a press in progress carries on. True = skip this frame.
+        afterwards) and a resting fist can't shoot. Before the hold sets in (CURL_COMMIT), a
+        frame is only skipped when skip (a tightly curled index): one frame that merely looks
+        like a thumbs-up inside a finger gun must not swallow a tap. True = skip this frame.
         """
         if curl:
             if self.curl_t0 is None:
                 self.curl_t0 = now
+                self.curl_levels = dict(self.trigger.levels)
             self.curl_last = now
             if not self.curl_hold and now - self.curl_t0 >= CURL_COMMIT - 1e-6:
                 self.curl_hold = True
                 self.trigger.reset()
-            return True
+                # what the trigger learnt while the thumb went up doesn't count
+                self.trigger.levels = self.curl_levels
+            return self.curl_hold or skip
         self.curl_t0 = None
         if not self.curl_hold:
             return False
