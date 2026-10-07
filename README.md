@@ -14,9 +14,8 @@ what it draws into a VR view.
 
 Status: experimental, built for and tested with the European release (PAL, product ID
 `MK-5100250`) on a Quest 3. Other versions need their own profile (see *How it works*).
-The newest parts, widening the game's own field of view and the fire animation, have
-not been tried on the headset yet; `vr.WidenFov=no` goes back to the earlier, tested
-widening.
+Shooting lands on the aim dot, the B button skips story scenes and the game's own hit flash
+is gone, and the agent's hands and racking the slide work (all tested on the headset).
 
 ## What you get
 
@@ -25,12 +24,21 @@ widening.
   per eye from your head, so you look around and lean into the scene at the headset's
   refresh rate, while the game runs at its own 60 Hz.
 - **A wider view than the original.** The game's own field of view is raised from 41° to
-  74° (vertical), inside the game: it draws, culls and checks your shots with it.
+  74° (vertical), inside the game: it draws and culls with it. Its light gun still only
+  counts shots inside the original view, so that is where you can hit things; around it
+  the aim dot turns into a grey ring and the trigger does nothing.
 - **2D on a screen in front of you.** Menus, text and the HUD sit on a plane at a fixed
-  distance, framed as in the original.
+  distance, framed as in the original. The game's own hit flash (a glow and rays drawn
+  just off its 2D plane, which in the headset came right at your face) is left out after
+  shots into the 3D scene: the aim dot, blood and the hit show where it went.
 - **The light gun.** Either controller. Shots are traced into the rebuilt scene from the
-  barrel, so you hit what you see; a laser line and dot show where (optional). Recoil,
-  muzzle flash, smoke and a haptic knock on every shot.
+  barrel and handed to the game at its own screen framing, so they land on the dot; a
+  laser line and dot show where (optional). Recoil, muzzle flash, smoke and a haptic
+  knock on every shot.
+- **The agent's own hands.** Made from your copy of the game (see below): his right hand
+  around his pistol in place of the arcade gun, his open left hand on the other controller.
+  Reload like with a real pistol: take the slide with the other hand (grip button) and pull
+  it back.
 - **Comfort.** Things that come right into your face (a zombie grabbing you) are pulled
   back a little, so your eyes don't have to cross. Recentering, adjustable world size.
 - Starts straight into the game from the headset's app library.
@@ -40,13 +48,20 @@ widening.
 | | Left controller | Right controller |
 |---|---|---|
 | Shoot | trigger | trigger |
-| Reload | Y, or shoot away from the screen | B, or shoot away from the screen |
-| Start (also skips cut scenes) | menu button ≡ | A |
+| Reload | shoot away from the view (past the grey ring), or rack the slide (below) | the same |
+| Skip a story scene, back in menus (the gun's B) | Y | B |
+| Start, pause | menu button ≡ | A |
 | Menus (the gun's D-pad) | thumbstick | thumbstick |
 | Recenter | X or thumbstick click | thumbstick click |
 | World size (kept) | hold grip + thumbstick up/down | hold grip + thumbstick up/down |
+| Gun size (kept) | hold grip + thumbstick left/right | hold grip + thumbstick left/right |
+| Rack the slide (the agent's pistol) | grip, near the back of the pistol, and pull | the same |
 
-The gun goes to the hand you last fired with. Holding the Meta button recenters too.
+The gun goes to the hand you last fired with; B and Y both work, whichever hand holds it.
+With the agent's pistol, bring the other hand to the back of the pistol, over the gun
+hand, squeeze its grip and pull towards you: the hand takes the slide, and all the way back
+it reloads (a knock in both hands). Let go and it springs home.
+Holding the Meta button recenters too.
 Quit with the Meta button, then *Quit*.
 
 ## Build
@@ -94,6 +109,27 @@ for the webcam finger-gun mode and for testing.
 
 No Dreamcast BIOS is needed: Flycast's built-in replacement (HLE) works.
 
+## The agent's hands (from your game)
+
+The hands and pistol in the headset are the game's own: the agent's, as the game draws him
+at the game over scene, kneeling with his pistol in his hand. They are taken from your copy
+of the game on the PC, and nothing of them is in this repository. Keep the file to yourself.
+
+1. Build the Windows version (`hotd2-vr\build-win.cmd`) and install Python with numpy and
+   pillow (`pip install -r hotd2-vr\assets\requirements.txt`).
+2. With the headset connected over `adb`:
+   ```bat
+   powershell -File hotd2-vr\rip-hands.ps1
+   ```
+   It starts the game on the PC, lets the agent lose (no input, about two and a half
+   minutes), rips that frame when he shows his pistol, and turns it into `run\hands.bin`
+   (with `run\hands-preview.png`), which goes into the app's files on the headset.
+   `-NoPush` keeps it on the PC; `-Manual` lets you play there yourself until the game over.
+3. Start *HOTD2 VR* again. Without the file it has the red arcade gun.
+
+By hand: `adb push hands.bin /data/local/tmp/`, then
+`adb shell "run-as com.flycast.emulator.vr sh -c 'cat /data/local/tmp/hands.bin > files/hands.bin'"`.
+
 ## Options
 
 Settings live in `/sdcard/Android/data/com.flycast.emulator.vr/files/emu.cfg`, under
@@ -106,6 +142,12 @@ Settings live in `/sdcard/Android/data/com.flycast.emulator.vr/files/emu.cfg`, u
 | `vr.WidenFov` | yes | widen through the game's own field of view (the profile knows where) |
 | `vr.Laser` | yes | laser line and dot |
 | `vr.ShowGun` | yes | the gun model |
+| `vr.GunScale` | 0.68 | size of the gun, times the 25 cm arcade gun it is modelled on (also set with grip + thumbstick) |
+| `vr.GameHands` | yes | the agent's hands and pistol, when `files/hands.bin` is there |
+| `vr.HandScale` | 1 | their size: 1 is a 20 cm pistol (also set with grip + thumbstick) |
+| `vr.SlideReload` | yes | rack the slide with the other hand to reload |
+| `vr.DropShotMarker` | yes | hide the game's own 2D shot flash after shots into the 3D scene (with `no` it shows at the stock-framed spot, not where the shot landed) |
+| `vr.DropShotFlash` | yes | hide a bright full-screen flash right after a shot, should the game draw one |
 | `vr.ComfortStart` / `vr.ComfortMin` | 0.8 / 0.4 | comfort zone, metres (0: off) |
 | `vr.HudDepth` | 40 | distance of the 2D plane, game units |
 | `vr.XrRefreshRate` | 72 | Hz |
@@ -120,9 +162,13 @@ Settings live in `/sdcard/Android/data/com.flycast.emulator.vr/files/emu.cfg`, u
   (`0x8C029C12`, `0x8C02B370`) for the routine at `0x8C0383C0`.
 - `core/rend/gles/gles.cpp`: the vertex shader does the lifting and reprojection; only
   frames the game actually presents reach the headset.
+- `core/hw/pvr/ta_vtx.cpp`: hands each parsed render pass to `vr::dropShotMarker` before
+  its index is built, which hides the game's 2D shot marker after shots into 3D.
 - `core/rend/vr/xr_host.*`: the OpenXR session (bound to Flycast's EGL context),
   headset-paced frames, controllers and the light gun ray cast.
 - `core/rend/vr/xr_gun.*`, `gun_model.h`: the gun, its effects and shaders.
+- `core/rend/vr/xr_hands.*`: the agent's hands and pistol from `files/hands.bin`, with the
+  slide that moves. The other hand's grip and the rack are in `xr_host.cpp`.
 - `core/input/udp_lightgun.*`: the light gun can also be driven over UDP on 127.0.0.1
   (used by the finger-gun tracker).
 
@@ -149,6 +195,11 @@ Settings live in `/sdcard/Android/data/com.flycast.emulator.vr/files/emu.cfg`, u
   thumbs-up (a fist, thumb up) held for half a second presses the game's Start: that is how
   player 2 joins in (and it pauses for a player already in the game).
 - `hotd2-vr/gun_model`: bakes a `.glb` gun model into `gun_model.h`.
+- `hotd2-vr/rip-hands.ps1`, `hotd2-vr/assets`: the agent's hands from your game (above). The
+  PC build rips a frame on request (`rip.request` in its working folder: every polygon as
+  the GPU got it, with the VRAM), `assets/riplib.py` reads that and decodes the textures,
+  and `assets/rip_hands.py` lifts the hands and pistol back into 3D, stands the pistol
+  upright, cuts its slide free along the line painted on its sides and writes `hands.bin`.
 - `hotd2-vr/re/sh4dis.py`: disassembles game code from a Flycast RAM dump (Capstone),
   which is how the field-of-view literals were found.
 - `hotd2-vr/run-test.ps1`: PC test runs with screenshots.

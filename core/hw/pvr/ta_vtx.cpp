@@ -1,4 +1,4 @@
-
+// hotd2-vr: modified in 2026 by mikermak for the Quest VR mode (see "git log master..hotd2-vr").
 /*
 	TA-VTX handling
 
@@ -9,6 +9,7 @@
 #include "pvr_mem.h"
 #include "Renderer_if.h"
 #include "cfg/option.h"
+#include "rend/vr_reproject.h"
 
 #include <algorithm>
 #include <utility>
@@ -1179,6 +1180,8 @@ static void parseRenderPass(RenderPass& pass, const RenderPass& previousPass, re
 		fix_texture_bleeding(ctx.global_param_pt, previousPass.pt_count, pass.pt_count, ctx);
 		fix_texture_bleeding(ctx.global_param_tr, previousPass.tr_count, pass.tr_count, ctx);
 	}
+	// hotd2-vr: the game's own 2D shot marker goes while its polygons are still whole
+	vr::dropShotMarker(ctx, pass, previousPass);
 	if (primRestart)
 	{
 		makePrimRestartIndex(ctx.global_param_op, previousPass.op_count, pass.op_count, true, ctx);

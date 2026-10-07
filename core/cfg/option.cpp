@@ -103,10 +103,16 @@ Option<float> VrXrResolution("vr.XrResolution", 1.f);	// eye buffer size, times 
 Option<int> VrXrRefreshRate("vr.XrRefreshRate", 72);	// Hz
 Option<bool> VrLaser("vr.Laser", true);		// aim line and dot from the gun
 Option<bool> VrShowGun("vr.ShowGun", true);	// a gun in the shooting hand
+Option<float> VrGunScale("vr.GunScale", 0.68f);	// its size, times the model's (24.7 cm long); 0.68: 17 cm, a compact pistol
+Option<bool> VrGameHands("vr.GameHands", true);	// the agent's own hands and pistol from the game, when files/hands.bin is there
+Option<float> VrHandScale("vr.HandScale", 1.f);	// their size, times the ripped model's (a 20 cm pistol)
+Option<bool> VrSlideReload("vr.SlideReload", true);	// with them, the other hand racks the slide to reload
 Option<float> VrComfortStart("vr.ComfortStart", 0.8f);	// metres; closer things get pulled back (0: off)
 Option<float> VrComfortMin("vr.ComfortMin", 0.4f);	// metres; ...but never closer than this
-Option<bool> VrAimWidened("vr.AimWidened", false);	// the game's gun hit test follows its widened view
+Option<bool> VrAimWidened("vr.AimWidened", false);	// aim on the widened view (the game's hit test uses its stock view)
 Option<bool> VrWidenFov("vr.WidenFov", true);	// widen through the game's field of view when its profile knows where
+Option<bool> VrDropShotMarker("vr.DropShotMarker", true);	// hide the game's own 2D shot marker after shots into 3D
+Option<bool> VrDropShotFlash("vr.DropShotFlash", true);	// hide a bright full-screen flash right after any shot
 Option<bool> CustomTextures("rend.CustomTextures");
 Option<bool> PreloadCustomTextures("rend.PreloadCustomTextures");
 Option<bool> DumpTextures("rend.DumpTextures");

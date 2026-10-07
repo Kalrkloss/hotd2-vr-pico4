@@ -15,6 +15,7 @@
 
 #ifdef USE_OPENXR
 #include "xr_gun.h"
+#include "xr_hands.h"
 #include <jni.h>
 #include <glad/egl.h>
 #include "rend/gles/gles.h"
@@ -35,6 +36,7 @@
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <iterator>
@@ -63,9 +65,10 @@ XrSpace localSpace = XR_NULL_HANDLE;
 constexpr int Left = 0, Right = 1;
 XrPath handPaths[2];
 XrSpace aimSpaces[2];
+XrSpace gripSpaces[2];		// the hand on the handle (grip pose): where the gun's grip goes
 int gunHand = Right;
 XrActionSet actionSet = XR_NULL_HANDLE;
-XrAction aimAction, triggerAction, startAction, reloadAction, recenterAction, hapticAction, stickAction, gripAction;
+XrAction aimAction, handAction, triggerAction, startAction, skipAction, recenterAction, hapticAction, stickAction, gripAction;
 PFN_xrRequestDisplayRefreshRateFB requestRefreshRate;
 PFN_xrPerfSettingsSetPerformanceLevelEXT setPerformanceLevel;
 
@@ -99,13 +102,17 @@ glm::quat originRot { 1, 0, 0, 0 };
 
 // Light gun state
 bool triggerWas, recenterWas;
+// The current pull started outside the game's view (aimOutside): it does nothing until
+// the trigger is let go, even when the aim moves into view.
+bool pullOutside;
 // The pistol as drawn: where it is (no pose: hidden), and the last shot for recoil/flash.
 GunView gunView;
 bool gunVisible;
 XrTime lastShot;
 unsigned shotCount;
-glm::vec2 lastShotScreen;
-XrTime lastFrameTime;
+// for capture-shot.request: trigger pulls so far, and where the last one went (DC pixels)
+std::atomic<u32> shotSerial;
+glm::vec2 lastShotScreen(-1.f);
 
 bool check(XrResult result, const char *what)
 {
@@ -150,17 +157,20 @@ bool initActions()
 	if (!XRCHECK(xrCreateActionSet(instance, &setInfo, &actionSet)))
 		return false;
 	if (!createAction(aimAction, "aim", "Aim", XR_ACTION_TYPE_POSE_INPUT, true)
+			|| !createAction(handAction, "hand", "Hand (holds the gun)", XR_ACTION_TYPE_POSE_INPUT, true)
 			|| !createAction(triggerAction, "trigger", "Fire", XR_ACTION_TYPE_FLOAT_INPUT, true)
 			|| !createAction(startAction, "start", "Start", XR_ACTION_TYPE_BOOLEAN_INPUT)
-			|| !createAction(reloadAction, "reload", "Reload", XR_ACTION_TYPE_BOOLEAN_INPUT)
+			|| !createAction(skipAction, "skip", "Skip, back (the gun's B)", XR_ACTION_TYPE_BOOLEAN_INPUT)
 			|| !createAction(recenterAction, "recenter", "Recenter", XR_ACTION_TYPE_BOOLEAN_INPUT)
 			|| !createAction(hapticAction, "recoil", "Recoil", XR_ACTION_TYPE_VIBRATION_OUTPUT, true)
 			|| !createAction(stickAction, "stick", "Menus (D-pad), world size", XR_ACTION_TYPE_VECTOR2F_INPUT)
-			|| !createAction(gripAction, "grip", "Hold for world size", XR_ACTION_TYPE_FLOAT_INPUT))
+			|| !createAction(gripAction, "grip", "Rack the slide; hold for world size", XR_ACTION_TYPE_FLOAT_INPUT, true))
 		return false;
-	// Either trigger fires. Start (also skips cut scenes): A, or the menu button on the left.
-	// Reload: B or Y (or shooting away from the screen). Recenter: X, or a thumbstick click.
-	// Thumbstick: the gun's D-pad (menus); with a grip held, up/down sizes the world.
+	// Either trigger fires; shooting away from the screen reloads. Start (pauses): A, or the
+	// menu button on the left. The gun's B (skips a story scene, backs out of menus): B or
+	// Y, under the thumb of whichever hand holds the gun. Recenter: X, or a thumbstick click.
+	// Thumbstick: the gun's D-pad (menus); with a grip held, up/down sizes the world. The
+	// other hand's grip racks the game pistol's slide.
 	const XrActionSuggestedBinding bindings[] {
 		{ stickAction, path("/user/hand/left/input/thumbstick") },
 		{ stickAction, path("/user/hand/right/input/thumbstick") },
@@ -168,12 +178,14 @@ bool initActions()
 		{ gripAction, path("/user/hand/right/input/squeeze/value") },
 		{ aimAction, path("/user/hand/left/input/aim/pose") },
 		{ aimAction, path("/user/hand/right/input/aim/pose") },
+		{ handAction, path("/user/hand/left/input/grip/pose") },
+		{ handAction, path("/user/hand/right/input/grip/pose") },
 		{ triggerAction, path("/user/hand/left/input/trigger/value") },
 		{ triggerAction, path("/user/hand/right/input/trigger/value") },
 		{ startAction, path("/user/hand/right/input/a/click") },
 		{ startAction, path("/user/hand/left/input/menu/click") },
-		{ reloadAction, path("/user/hand/right/input/b/click") },
-		{ reloadAction, path("/user/hand/left/input/y/click") },
+		{ skipAction, path("/user/hand/right/input/b/click") },
+		{ skipAction, path("/user/hand/left/input/y/click") },
 		{ recenterAction, path("/user/hand/left/input/x/click") },
 		{ recenterAction, path("/user/hand/left/input/thumbstick/click") },
 		{ recenterAction, path("/user/hand/right/input/thumbstick/click") },
@@ -198,6 +210,9 @@ bool initActions()
 		spaceInfo.subactionPath = handPaths[hand];
 		spaceInfo.poseInActionSpace.orientation.w = 1.f;
 		if (!XRCHECK(xrCreateActionSpace(session, &spaceInfo, &aimSpaces[hand])))
+			return false;
+		spaceInfo.action = handAction;
+		if (!XRCHECK(xrCreateActionSpace(session, &spaceInfo, &gripSpaces[hand])))
 			return false;
 	}
 	return true;
@@ -504,6 +519,20 @@ constexpr float MinSceneW = 0.5f;
 
 // How the last aim was placed, for the shot log.
 const char *aimHow = "";
+// The last aim is on something the player sees but the game can't hit: outside its stock
+// view (see aimAtScene). The dot greys and the trigger does nothing there.
+bool aimOutside;
+// ...and for 3D aims, the triangle that was hit (diagnostics: which game geometry the ray
+// meets, at what original W).
+struct AimHit
+{
+	const char *list = "";
+	u32 poly = 0;
+	float w[3] {};
+	glm::vec2 xy[3] {};
+	u32 tex = 0, tsp = 0, isp = 0;
+	u8 col[4] {};
+} aimHit;
 
 bool onGameScreen(const glm::vec2& screen) {
 	return screen.x >= 0.f && screen.x <= 1.f && screen.y >= 0.f && screen.y <= 1.f;
@@ -540,11 +569,13 @@ bool inTriangle(const glm::vec2& p, const glm::vec2& a, const glm::vec2& b, cons
 //  - 2D overlay (menu items, text) is on its own plane at the stock framing: when the ray
 //    passes through a piece of it, the shot goes there. So do all shots on a screen with
 //    nothing but overlay (menus).
-//  - Otherwise the nearest 3D surface, placed on the screen the game sees: its live
-//    (possibly widened) view.
+//  - Otherwise the nearest 3D surface, placed on the screen at the game's stock framing,
+//    which its hit test uses even when its view is widened; in the wider band around
+//    it: aimOutside.
 //  - Nothing hit: the point far along the ray.
 bool aimAtScene(const rend_context& ctx, const glm::vec3& o, const glm::vec3& d, glm::vec2& screen, float& dist)
 {
+	aimOutside = false;
 	const GameCamera cam = gameCamera(ctx);
 	const glm::vec3 comfort = comfortParams();
 	static std::vector<glm::vec3> pos;
@@ -563,9 +594,7 @@ bool aimAtScene(const rend_context& ctx, const glm::vec3& o, const glm::vec3& d,
 		const glm::vec2 ndc(v.x * 2.f / cam.dcSize.x - 1.f, v.y * 2.f / cam.dcSize.y - 1.f);
 		if (std::abs(w - cam.overlayW) < 0.002f)
 		{
-			// hidden letterbox bars aren't there to shoot at
-			if (config::VrHideLetterbox && v.col[3] > 250 && v.col[0] < 3 && v.col[1] < 3 && v.col[2] < 3)
-				continue;
+			// (hidden letterbox bars have NaN x/y and are in no triangle)
 			overlayNdc[i] = ndc;
 			kind[i] = Overlay;
 		}
@@ -588,6 +617,9 @@ bool aimAtScene(const rend_context& ctx, const glm::vec3& o, const glm::vec3& d,
 	bool overlayHit = false;
 	bool hasScene = false;
 	float nearest = 1e30f;
+	const char *listName = "";
+	u32 polyIndex = 0;
+	const PolyParam *poly = nullptr;
 	auto triangle = [&](u32 a, u32 b, u32 c, bool solid, bool background) {
 		if (a == RestartIndex || b == RestartIndex || c == RestartIndex
 				|| a >= kind.size() || b >= kind.size() || c >= kind.size())
@@ -606,14 +638,35 @@ bool aimAtScene(const rend_context& ctx, const glm::vec3& o, const glm::vec3& d,
 				hasScene = true;
 			const float t = rayTriangle(o, d, pos[a], pos[b], pos[c]);
 			if (t > 0.f && t < nearest)
+			{
 				nearest = t;
+				aimHit.list = listName;
+				aimHit.poly = polyIndex;
+				const u32 abc[3] { a, b, c };
+				for (int k = 0; k < 3; k++)
+				{
+					const Vertex& v = ctx.verts[abc[k]];
+					aimHit.w[k] = 1.f / v.z;
+					aimHit.xy[k] = glm::vec2(v.x, v.y);
+				}
+				if (poly != nullptr)
+				{
+					aimHit.tex = poly->tcw.TexAddr << 3;
+					aimHit.tsp = poly->tsp.full;
+					aimHit.isp = poly->isp.full;
+				}
+				memcpy(aimHit.col, ctx.verts[a].col, 4);
+			}
 		}
 	};
 	// strips: first/count are ranges of the index buffer
 	auto strips = [&](const std::vector<PolyParam>& list, size_t from, size_t to, bool solid, bool opaque) {
+		listName = &list == &ctx.global_param_op ? "OP" : &list == &ctx.global_param_pt ? "PT" : "TR";
 		for (size_t n = from; n < to && n < list.size(); n++)
 		{
 			const PolyParam& pp = list[n];
+			polyIndex = (u32)n;
+			poly = &pp;
 			for (u32 j = pp.first; j + 2 < pp.first + pp.count && j + 2 < ctx.idx.size(); j++)
 				// the first opaque polygon is the background plane
 				triangle(ctx.idx[j], ctx.idx[j + 1], ctx.idx[j + 2], solid, opaque && n == 0);
@@ -653,21 +706,27 @@ bool aimAtScene(const rend_context& ctx, const glm::vec3& o, const glm::vec3& d,
 	const glm::vec3 hit = o + d * dist;
 	if (hit.z > -1e-3f)
 		return false;
-	// The game tests gun hits with its stock view, not the widened one it draws with
-	// (HOTD2: shots drifted towards the centre, more so near the edges, right where its
-	// own shot flash showed up). So the hit point goes on the screen at the stock framing:
-	// the shot lands where the dot is, and outside the stock view is off screen, as in
-	// the original game.
-	// With the game's own field of view widened (widensGameFov) its hit test sees what it
-	// draws, so the hit point goes on the screen with the live view.
-	const glm::vec2 tan = config::VrAimWidened || widensGameFov() ? cam.tanHalf : cam.dcSize * 0.5f / (float)config::VrFocal;
+	// The game tests gun hits with its stock view, not the widened one it draws with. With
+	// viewport widening that showed as shots drifting towards the centre, and it holds with
+	// the game's own field of view widened too (vr.WidenFov): on the headset, a shot sent
+	// at x 410 (of 640) had the game's hit effect ~8 degrees nearer the centre than the dot,
+	// exactly where the stock framing puts it. So the hit point goes on the screen at the
+	// stock framing: the shot lands where the dot is. The wider view around it is seen but
+	// can't be hit (as in the original game, where it wasn't on screen): aimOutside.
+	const glm::vec2 stockTan = cam.dcSize * 0.5f / (float)config::VrFocal;
+	const glm::vec2 tan = config::VrAimWidened ? cam.tanHalf : stockTan;
 	screen = glm::vec2(hit.x / (-hit.z * tan.x), hit.y / (-hit.z * tan.y)) * 0.5f + 0.5f;
-	return onGameScreen(screen);
+	if (onGameScreen(screen))
+		return true;
+	const glm::vec2 seen = glm::vec2(hit.x / (-hit.z * cam.tanHalf.x), hit.y / (-hit.z * cam.tanHalf.y)) * 0.5f + 0.5f;
+	aimOutside = onGameScreen(seen);
+	return false;
 }
 
 // The flat screen menus and notices are shown on (see drawVrScreen in gles.cpp).
 bool aimAtFlatScreen(const glm::vec3& o, const glm::vec3& d, glm::vec2& screen, float& dist)
 {
+	aimOutside = false;
 	glm::vec2 ndc;
 	if (!hitOverlayPlane(o, d, glm::vec2(640.f, 480.f), ndc, dist))
 		return false;
@@ -693,16 +752,21 @@ float floatAction(XrAction action, int hand)
 	return XR_SUCCEEDED(xrGetActionStateFloat(session, &info, &state)) && state.isActive ? state.currentState : 0.f;
 }
 
-void recoil()
+void haptic(int hand, float seconds, float amplitude)
 {
 	XrHapticActionInfo info { XR_TYPE_HAPTIC_ACTION_INFO };
 	info.action = hapticAction;
-	info.subactionPath = handPaths[gunHand];
+	info.subactionPath = handPaths[hand];
 	XrHapticVibration vibration { XR_TYPE_HAPTIC_VIBRATION };
-	vibration.duration = 30'000'000;	// 30 ms: a sharp knock
+	vibration.duration = (XrDuration)(seconds * 1e9f);
 	vibration.frequency = XR_FREQUENCY_UNSPECIFIED;
-	vibration.amplitude = 1.f;
+	vibration.amplitude = amplitude;
 	xrApplyHapticFeedback(session, &info, (const XrHapticBaseHeader *)&vibration);
+}
+
+void recoil()
+{
+	haptic(gunHand, 0.03f, 1.f);	// a sharp knock
 }
 
 glm::vec2 stickAction2()
@@ -733,36 +797,149 @@ u32 dpadFromStick(const glm::vec2& stick)
 }
 
 // With a grip held, thumbstick up makes the world bigger around the player, down smaller
-// (about 1.8x per second held). The size is kept in emu.cfg when the stick is let go.
-// Returns true while sizing (the stick then isn't the D-pad).
+// (about 1.8x per second held), and right makes the gun bigger, left smaller (about 1.6x
+// per second). Both are kept in emu.cfg when the stick is let go.
+// Returns true while gripping (the stick then isn't the D-pad).
 bool adjustWorldSize(XrTime time, const glm::vec2& stick)
 {
 	static XrTime lastTime;
-	static bool changed;
+	static bool worldChanged, gunChanged;
 	const float dt = lastTime != 0 ? std::clamp((time - lastTime) * 1e-9f, 0.f, 0.1f) : 0.f;
 	lastTime = time;
 	XrActionStateGetInfo info { XR_TYPE_ACTION_STATE_GET_INFO };
 	info.action = gripAction;
 	XrActionStateFloat grip { XR_TYPE_ACTION_STATE_FLOAT };
 	const bool gripped = XR_SUCCEEDED(xrGetActionStateFloat(session, &info, &grip)) && grip.isActive && grip.currentState > 0.7f;
-	const float y = gripped ? stick.y : 0.f;
-	if (std::abs(y) > 0.5f)
+	const glm::vec2 s = gripped ? stick : glm::vec2(0.f);
+	// the stronger direction only, so a diagonal doesn't change both
+	const bool vertical = std::abs(s.y) >= std::abs(s.x);
+	if (vertical && std::abs(s.y) > 0.5f)
 	{
-		const float scale = std::clamp(config::VrWorldScale * std::exp((y > 0.f ? 0.6f : -0.6f) * dt), 0.005f, 0.2f);
+		const float scale = std::clamp(config::VrWorldScale * std::exp((s.y > 0.f ? 0.6f : -0.6f) * dt), 0.005f, 0.2f);
 		config::VrWorldScale.set(scale);
-		changed = true;
+		worldChanged = true;
 	}
-	else if (changed)
+	else if (worldChanged)
 	{
-		changed = false;
+		worldChanged = false;
 		config::saveFloat("config", "vr.WorldScale", config::VrWorldScale);
 		NOTICE_LOG(RENDERER, "XR: world size %.4f m per game unit", (float)config::VrWorldScale);
+	}
+	// the size of whichever pistol is drawn
+	const bool game = gameGun();
+	config::Option<float>& gunSize = game ? config::VrHandScale : config::VrGunScale;
+	const char *gunKey = game ? "vr.HandScale" : "vr.GunScale";
+	if (!vertical && std::abs(s.x) > 0.5f)
+	{
+		gunSize.set(std::clamp(gunSize * std::exp((s.x > 0.f ? 0.5f : -0.5f) * dt), 0.4f, 1.6f));
+		gunChanged = true;
+	}
+	else if (gunChanged)
+	{
+		gunChanged = false;
+		config::saveFloat("config", gunKey, gunSize);
+		NOTICE_LOG(RENDERER, "XR: gun size %.2f (%s)", (float)gunSize, gunKey);
 	}
 	return gripped;
 }
 
 // Off the game screen, as a light gun sees it (any negative position).
 constexpr int OffScreen = -10000;
+
+// The other hand, with the game's pistol (xr_hands.h): the open hand follows the other
+// controller. Its grip squeezed near the back of the slide takes the slide, and pulling it
+// back all the way reloads, as the game knows it: a shot off the screen. Let go, the slide
+// springs home.
+struct Slide
+{
+	bool held;
+	bool racked;		// this pull reloaded already
+	bool squeezeWas;
+	bool clack;			// pulled well back: it hits home with a knock
+	float from;			// the hand along the barrel when it took the slide (model metres)
+	float back;			// how far back the slide is (model metres)
+	XrTime time;
+} slide;
+// When the last rack reloaded (0: done), and a trigger held through it.
+XrTime reloadAt;
+bool triggerWait;
+// How far the hand (the controller's grip) may be from the back of the slide to take it:
+// the controllers can't overlap, and the pistol's back sits over the gun hand's ring.
+constexpr float GrabReach = 0.11f;
+
+void updateOtherHand(XrTime time, int hand, bool tracked, const XrSpaceLocation& location,
+		const glm::mat4& restGun, float scale, bool mirror)
+{
+	const HandsModel *model = handsModel();
+	const float dt = slide.time != 0 ? std::clamp((time - slide.time) * 1e-9f, 0.f, 0.1f) : 0.f;
+	slide.time = time;
+	gunView.otherHand = false;
+	if (!tracked || model == nullptr)
+		slide.held = false;
+	else
+	{
+		const glm::quat rot = relativeRotation(location.pose.orientation);
+		const glm::mat4 aim = glm::translate(glm::mat4(1.f), relativePosition(location.pose.position)) * glm::mat4_cast(rot);
+		glm::vec3 palm = HandPalm;
+		XrSpaceLocation grip { XR_TYPE_SPACE_LOCATION };
+		if (XR_SUCCEEDED(xrLocateSpace(gripSpaces[hand], aimSpaces[hand], time, &grip))
+				&& (grip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+				&& glm::length(toVec(grip.pose.position)) < 0.25f)
+			palm = toVec(grip.pose.position);
+		const glm::vec3 handAt = glm::vec3(aim * glm::vec4(palm, 1.f));
+		// the hand in the pistol's model space (without recoil)
+		const glm::vec3 inGun = glm::vec3(glm::inverse(restGun) * glm::vec4(handAt, 1.f));
+		const float squeeze = floatAction(gripAction, hand);
+		const bool squeezed = slide.squeezeWas ? squeeze > 0.35f : squeeze > 0.6f;
+		if (config::VrSlideReload && squeezed && !slide.squeezeWas && !slide.held)
+		{
+			const glm::vec3 grabAt = glm::vec3(restGun * glm::vec4(model->grab + glm::vec3(0.f, 0.f, slide.back), 1.f));
+			const float reach = glm::distance(grabAt, handAt);
+			if (reach < GrabReach)
+			{
+				slide.held = true;
+				slide.racked = false;
+				slide.from = inGun.z - slide.back;
+				haptic(hand, 0.012f, 0.35f);
+			}
+			NOTICE_LOG(INPUT, "XR: grip %d cm from the slide%s", (int)(reach * 100.f), slide.held ? ": took it" : "");
+		}
+		slide.squeezeWas = squeezed;
+		if (slide.held && !squeezed)
+		{
+			slide.held = false;
+			slide.clack = slide.back > model->travel * 0.5f;
+		}
+		if (slide.held)
+		{
+			slide.back = std::clamp(inGun.z - slide.from, 0.f, model->travel);
+			if (!slide.racked && slide.back > model->travel * 0.85f)
+			{
+				slide.racked = true;
+				reloadAt = time;
+				haptic(hand, 0.025f, 0.8f);
+				haptic(gunHand, 0.025f, 0.6f);
+				NOTICE_LOG(INPUT, "XR: slide racked (reload)");
+			}
+		}
+		gunView.otherHand = true;
+		gunView.handPose = slide.held
+				// on the slide, going along with it
+				? gunView.pose * glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, slide.back)) * model->onSlide
+				// the model is a left hand: mirrored for the right
+				: aim * glm::translate(glm::mat4(1.f), palm) * glm::scale(glm::mat4(1.f), glm::vec3(mirror ? -scale : scale, scale, scale));
+	}
+	if (!slide.held && slide.back > 0.f)
+	{
+		// home it goes, fast
+		slide.back = std::max(0.f, slide.back - dt * 1.5f);
+		if (slide.back == 0.f && slide.clack)
+			haptic(gunHand, 0.02f, 0.7f);
+	}
+	if (slide.back == 0.f)
+		slide.clack = false;
+	gunView.slide = slide.back;
+}
 
 void updateLightgun(XrTime time)
 {
@@ -821,14 +998,36 @@ void updateLightgun(XrTime time)
 	{
 		const glm::quat rot = relativeRotation(location.pose.orientation);
 		const glm::mat4 pose = glm::translate(glm::mat4(1.f), relativePosition(location.pose.position)) * glm::mat4_cast(rot);
+		// The drawn gun: the middle of its grip where the hand is (the controller's grip
+		// pose, seen from the aim pose), at vr.GunScale times the model's size.
+		glm::vec3 palm = HandPalm;
+		XrSpaceLocation grip { XR_TYPE_SPACE_LOCATION };
+		const bool fromRuntime = XR_SUCCEEDED(xrLocateSpace(gripSpaces[gunHand], aimSpaces[gunHand], time, &grip))
+				&& (grip.locationFlags & XR_SPACE_LOCATION_POSITION_VALID_BIT)
+				&& glm::length(toVec(grip.pose.position)) < 0.25f;
+		if (fromRuntime)
+			palm = toVec(grip.pose.position);
+		static int palmLogged = -1;		// hand * 2 + where it came from
+		if (palmLogged != gunHand * 2 + fromRuntime)
+		{
+			palmLogged = gunHand * 2 + fromRuntime;
+			NOTICE_LOG(INPUT, "XR: %s hand at %.3f %.3f %.3f from the aim pose (%s)", gunHand == Right ? "right" : "left",
+					palm.x, palm.y, palm.z, fromRuntime ? "runtime" : "fallback");
+		}
+		const bool game = gameGun();
+		const float gunScale = std::clamp(game ? (float)config::VrHandScale : (float)config::VrGunScale, 0.4f, 1.6f);
+		// the game's pistol is in a right hand: mirrored for the left
+		const bool mirror = game && gunHand == Left;
+		const glm::mat4 placement = gunPlacement(game, gunScale, palm, mirror);
 		// Shots leave the muzzle along the barrel, so the aim line and the hit agree. Into
 		// rebuilt game eye space for the hit test.
-		const glm::vec3 o = glm::vec3(pose * glm::vec4(GunMuzzle, 1.f));
+		const glm::vec3 o = glm::vec3(pose * placement * glm::vec4(gunMuzzle(), 1.f));
 		const glm::vec3 d = rot * glm::vec3(0, 0, -1);
 		const float s = config::VrWorldScale;
 		const glm::vec3 og = glm::vec3(o.x, -o.y, o.z) / s;
 		const glm::vec3 dg = glm::normalize(glm::vec3(d.x, -d.y, d.z));
 		float dist = -1.f;
+		aimOutside = false;
 		const rend_context *ctx = gles_vr_frame();
 		if (gles_vr_showing_framebuffer())
 			onScreen = aimAtFlatScreen(og, dg, screen, dist);
@@ -842,18 +1041,18 @@ void updateLightgun(XrTime time)
 		{
 			lastShot = time;
 			shotCount++;
-			lastShotScreen = screen;
 		}
-		lastFrameTime = time;
 		const float sinceShot = lastShot != 0 ? (time - lastShot) * 1e-9f : 1e9f;
 		const float kick = gunKick(sinceShot);
 		const float twist = ((shotCount * 2654435761u) >> 24) / 255.f - 0.5f;	// -0.5..0.5 per shot
-		const glm::vec3 hand(0.f, -0.06f, 0.06f);
+		const glm::vec3 hand = palm;
 		glm::mat4 recoilMat = glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, 0.035f * kick) + hand);
 		recoilMat = glm::rotate(recoilMat, glm::radians(18.f * kick), glm::vec3(1, 0, 0));
 		recoilMat = glm::rotate(recoilMat, glm::radians(6.f * twist * std::max(kick, 0.f)), glm::vec3(0, 1, 0));
 		recoilMat = glm::translate(recoilMat, -hand);
-		gunView.pose = pose * recoilMat;
+		gunView.pose = pose * recoilMat * placement;
+		// (the game's pistol has a smaller muzzle than the arcade gun's lens)
+		gunView.scale = game ? gunScale * 0.8f : gunScale;
 		gunView.restMuzzle = o;
 		gunView.restForward = d;
 		gunView.trigger = std::clamp(pull, 0.f, 1.f);
@@ -861,37 +1060,212 @@ void updateLightgun(XrTime time)
 		gunView.sinceShot = sinceShot;
 		gunView.shot = shotCount;
 		gunView.aimLine = config::VrLaser;
-		gunView.aimDot = config::VrLaser && onScreen;
+		gunView.aimDot = config::VrLaser && (onScreen || aimOutside);
+		gunView.aimOutside = aimOutside && !onScreen;
 		gunView.aimPoint = o + d * (dist > 0.f ? dist * s : 5.f);
 		gunVisible = config::VrShowGun;
+		if (game)
+			updateOtherHand(time, 1 - gunHand, tracked[1 - gunHand], locations[1 - gunHand], pose * placement, gunScale, mirror);
+		else
+		{
+			gunView.otherHand = false;
+			gunView.slide = 0.f;
+		}
 	}
 
+	// Seen but outside the game's view: the trigger does nothing (no shot, no reload).
+	const bool outside = !onScreen && aimOutside;
+	// What a pull does is decided when it starts. One started in the grey margin never
+	// fires. One started on screen (a shot) or off it (a reload) keeps the game's A held
+	// without a break until it is let go, also while crossing the margin: the reload bit is
+	// A held too (maple_lightgun::transform_kcode), so no new press reaches the game and a
+	// held trigger never fires again by sweeping.
+	if (trigger && !triggerWas)
+		pullOutside = outside;
 	u32 buttons = 0;
-	if (trigger)
+	if (trigger && !pullOutside)
 		// pointing away from the screen fires off-screen: that's how you reload
 		buttons |= onScreen ? 1 : 2;
-	if (boolAction(reloadAction))
-		buttons |= 2;
+	// A shot at the 2D plane (menus, text, a flat screen): the game's own shot marker lands
+	// right where it hit, so it stays (vr::dropShotMarker).
+	if (trigger && onScreen && (!strcmp(aimHow, "2D") || !strcmp(aimHow, "menu") || !strcmp(aimHow, "screen")))
+		buttons |= 256;
+	// The gun's B: HOTD2 skips a story scene and backs out of menus with it.
+	if (boolAction(skipAction))
+		buttons |= 128;
 	if (boolAction(startAction))
 		buttons |= 4;
 	buttons |= dpad;
-	if (trigger && !triggerWas)
+	// A rack of the slide reloads: the trigger let go for a moment, then pulled off the
+	// screen. A trigger held through it waits to be let go, so it doesn't fire right after.
+	bool reloading = false;
+	if (reloadAt != 0)
+	{
+		const float since = (time - reloadAt) * 1e-9f;
+		if (since < 0.15f)
+		{
+			buttons &= ~3u;
+			if (since >= 0.05f)
+			{
+				buttons |= 2;
+				reloading = true;
+			}
+			triggerWait = triggerWait || trigger;
+		}
+		else
+			reloadAt = 0;
+	}
+	if (triggerWait && !trigger)
+		triggerWait = false;
+	if (triggerWait && reloadAt == 0)
+		buttons &= ~3u;
+	// Trigger + B + Start is the game's own reset. A and B sit under one thumb: not by accident.
+	if ((buttons & 128) && (buttons & 3))
+		buttons &= ~4u;
+	if (trigger && !triggerWas && outside)
+		NOTICE_LOG(INPUT, "XR: trigger outside the game's view (no shot)");
+	else if (trigger && !triggerWas)
 	{
 		recoil();
+		lastShotScreen = onScreen ? glm::vec2(screen.x * 640.f, screen.y * 480.f) : glm::vec2(-1.f);
+		shotSerial++;
 		// diagnostics: where shots go, to compare with what the game makes of them
-		if (onScreen)
+		if (onScreen && !strcmp(aimHow, "3D"))
+			NOTICE_LOG(INPUT, "XR: shot at %d,%d (3D, %d cm) hit %s %u W %.1f/%.1f/%.1f at %.0f,%.0f %.0f,%.0f %.0f,%.0f tex %06x tsp %08x isp %08x col %02x%02x%02x%02x",
+					(int)(screen.x * 640.f), (int)(screen.y * 480.f), (int)(glm::length(gunView.aimPoint - gunView.restMuzzle) * 100.f),
+					aimHit.list, aimHit.poly, aimHit.w[0], aimHit.w[1], aimHit.w[2], aimHit.xy[0].x, aimHit.xy[0].y,
+					aimHit.xy[1].x, aimHit.xy[1].y, aimHit.xy[2].x, aimHit.xy[2].y, aimHit.tex, aimHit.tsp, aimHit.isp,
+					aimHit.col[0], aimHit.col[1], aimHit.col[2], aimHit.col[3]);
+		else if (onScreen)
 			NOTICE_LOG(INPUT, "XR: shot at %d,%d (%s, %d cm)", (int)(screen.x * 640.f), (int)(screen.y * 480.f), aimHow,
-					(int)(glm::length(gunView.aimPoint - glm::vec3(gunView.pose[3])) * 100.f));
+					(int)(glm::length(gunView.aimPoint - gunView.restMuzzle) * 100.f));
 		else
 			NOTICE_LOG(INPUT, "XR: shot off screen (reload)");
 	}
 	triggerWas = trigger;
-	const glm::ivec2 pos = onScreen ? glm::ivec2(screen * 10000.f) : glm::ivec2(OffScreen);
+	const glm::ivec2 pos = onScreen && !reloading ? glm::ivec2(screen * 10000.f) : glm::ivec2(OffScreen);
 	lightgunSet(0, pos.x, pos.y, buttons);
 }
 
-// Debug aid: "touch files/capture.request" (run-as) and the next left-eye image is
-// written to files/eye0.ppm.
+// Left-eye image, every `step`th pixel, to a PPM file. Buffers are kept and the file goes
+// out in one write: a capture runs on the render thread, frame after frame.
+static bool writeEye(GLuint fbo, int width, int height, const std::string& path, int step)
+{
+	static std::vector<u8> pixels, rgb;
+	pixels.resize((size_t)width * height * 4);
+	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
+	glPixelStorei(GL_PACK_ALIGNMENT, 1);
+	glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
+	const int w = width / step, h = height / step;
+	rgb.resize((size_t)w * h * 3);
+	u8 *out = rgb.data();
+	for (int row = 0; row < h; row++)
+	{
+		const int y = height - 1 - row * step;	// GL rows go up
+		for (int col = 0; col < w; col++, out += 3)
+			memcpy(out, &pixels[((size_t)y * width + (size_t)col * step) * 4], 3);
+	}
+	FILE *f = fopen(path.c_str(), "wb");
+	if (f == nullptr)
+		return false;
+	fprintf(f, "P6\n%d %d\n255\n", w, h);
+	fwrite(rgb.data(), 1, rgb.size(), f);
+	fclose(f);
+	return true;
+}
+
+// The shown frame's polygons on the 2D plane, for finding what the game draws right after
+// a shot. The frame has been parsed: opaque and punch-through polygons, and translucent ones
+// of passes that weren't auto-sorted, are ranges of the index buffer by now (strips merged
+// into one, the others left empty); only auto-sorted translucent ones still point at vertices.
+// Hidden vertices (NaN) were left out of the indices, so they can't be counted here.
+static void writeOverlayList(const std::string& path, const glm::vec2& gun)
+{
+	const rend_context *ctx = gles_vr_frame();
+	FILE *s = ctx != nullptr ? fopen(path.c_str(), "w") : nullptr;
+	if (s == nullptr)
+		return;
+	const GameCamera cam = gameCamera(*ctx);
+	fprintf(s, "gun %.0f %.0f  dc %.0fx%.0f  overlayW %.4f\n", gun.x, gun.y, cam.dcSize.x, cam.dcSize.y, cam.overlayW);
+	// which translucent polygons still point at vertices
+	std::vector<bool> trByVertex(ctx->global_param_tr.size(), false);
+	RenderPass prev {};
+	for (const RenderPass& pass : ctx->render_passes)
+	{
+		if (pass.sorted_tr_count != prev.sorted_tr_count)
+			for (u32 n = prev.tr_count; n < pass.tr_count && n < trByVertex.size(); n++)
+				trByVertex[n] = true;
+		prev = pass;
+	}
+	std::vector<u32> vis;
+	int lines = 0, mixedDumped = 0;
+	for (const auto& [list, name] : { std::pair(&ctx->global_param_op, "OP"), std::pair(&ctx->global_param_pt, "PT"),
+			std::pair(&ctx->global_param_tr, "TR") })
+		for (size_t n = 0; n < list->size() && lines < 400; n++)
+		{
+			const PolyParam& pp = (*list)[n];
+			vis.clear();
+			if (list == &ctx->global_param_tr && trByVertex[n])
+			{
+				for (u32 i = pp.first; i < pp.first + pp.count && i < ctx->verts.size(); i++)
+					vis.push_back(i);
+			}
+			else
+			{
+				for (u32 j = pp.first; j < pp.first + pp.count && j < ctx->idx.size(); j++)
+				{
+					const u32 vi = ctx->idx[j];
+					if (vi != RestartIndex && vi < ctx->verts.size() && (vis.empty() || vis.back() != vi))
+						vis.push_back(vi);
+				}
+			}
+			if (vis.empty())
+				continue;
+			glm::vec2 lo(1e30f), hi(-1e30f);
+			u32 overlay = 0, finite = 0;
+			float wMin = 1e30f, wMax = 0.f;
+			for (u32 vi : vis)
+			{
+				const Vertex& v = ctx->verts[vi];
+				if (!std::isfinite(v.x) || !std::isfinite(v.y))
+					continue;
+				finite++;
+				const float w = v.z > 0.f ? 1.f / v.z : 0.f;
+				overlay += std::abs(w - cam.overlayW) < 0.002f;
+				wMin = std::min(wMin, w);
+				wMax = std::max(wMax, w);
+				lo = glm::min(lo, glm::vec2(v.x, v.y));
+				hi = glm::max(hi, glm::vec2(v.x, v.y));
+			}
+			const u8 *c = ctx->verts[vis[0]].col;
+			const bool bigBright = lo.x <= hi.x && hi.x - lo.x >= cam.dcSize.x * 0.5f && hi.y - lo.y >= cam.dcSize.y * 0.5f
+					&& c[0] >= 0xc0 && c[1] >= 0xc0;
+			if (overlay == 0 && !bigBright)
+				continue;
+			fprintf(s, "%s %zu: %zu verts (%u on 2D) at %.0f,%.0f..%.0f,%.0f W %.3f..%.3f tex %06x tsp %08x isp %08x col %02x%02x%02x%02x\n",
+					name, n, vis.size(), overlay, lo.x, lo.y, hi.x, hi.y, wMin, wMax,
+					(unsigned)(pp.tcw.TexAddr << 3), pp.tsp.full, pp.isp.full, c[0], c[1], c[2], c[3]);
+			lines++;
+			// strips with both 2D-plane and 3D vertices: every vertex
+			if (overlay > 0 && overlay < finite && mixedDumped < 12)
+			{
+				mixedDumped++;
+				for (size_t k = 0; k < vis.size() && k < 64; k++)
+				{
+					const Vertex& v = ctx->verts[vis[k]];
+					fprintf(s, "    v %zu: %.1f,%.1f W %.3f col %02x%02x%02x%02x uv %.3f,%.3f\n", k, v.x, v.y,
+							v.z > 0.f ? 1.f / v.z : 0.f, v.col[0], v.col[1], v.col[2], v.col[3], v.u, v.v);
+				}
+			}
+		}
+	fclose(s);
+}
+
+// Debug aids (run-as):
+//  "touch files/capture.request": the next left-eye image to files/eye0.ppm, plus fb0.ppm
+//    (the console's video output in VRAM) and scene.txt (3D triangles);
+//  "touch files/capture-shot.request": at the next trigger pull, 8 frames in a row to
+//    files/shot1..8.ppm (half size) with the 2D polygons of each in shot1..8.txt.
 void captureIfRequested(GLuint fbo, int width, int height)
 {
 	static std::string dir;
@@ -902,22 +1276,40 @@ void captureIfRequested(GLuint fbo, int width, int height)
 		const size_t at = game.find("/files/");
 		dir = at == std::string::npos ? "/data/local/tmp" : game.substr(0, at + 6);
 	}
+	static bool shotArmed;
+	static u32 armedSerial;
+	static int shotFrame = -1;
+	const std::string shotRequest = dir + "/capture-shot.request";
+	if (!shotArmed && shotFrame < 0 && access(shotRequest.c_str(), F_OK) == 0)
+	{
+		unlink(shotRequest.c_str());
+		shotArmed = true;
+		armedSerial = shotSerial;
+		NOTICE_LOG(RENDERER, "XR: capturing at the next shot");
+	}
+	if (shotArmed && shotSerial != armedSerial)
+	{
+		shotArmed = false;
+		shotFrame = 0;
+	}
+	if (shotFrame >= 0)
+	{
+		shotFrame++;
+		const std::string name = dir + "/shot" + std::to_string(shotFrame);
+		writeEye(fbo, width, height, name + ".ppm", 2);
+		writeOverlayList(name + ".txt", lastShotScreen);
+		if (shotFrame >= 8)
+		{
+			shotFrame = -1;
+			NOTICE_LOG(RENDERER, "XR: captured 8 frames after the shot to %s/shot1..8", dir.c_str());
+		}
+	}
 	const std::string request = dir + "/capture.request";
 	if (access(request.c_str(), F_OK) != 0)
 		return;
 	unlink(request.c_str());
-	std::vector<u8> pixels((size_t)width * height * 4);
-	glBindFramebuffer(GL_FRAMEBUFFER, fbo);
-	glPixelStorei(GL_PACK_ALIGNMENT, 1);
-	glReadPixels(0, 0, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
-	FILE *f = fopen((dir + "/eye0.ppm").c_str(), "wb");
-	if (f == nullptr)
+	if (!writeEye(fbo, width, height, dir + "/eye0.ppm", 1))
 		return;
-	fprintf(f, "P6\n%d %d\n255\n", width, height);
-	for (int y = height - 1; y >= 0; y--)
-		for (int x = 0; x < width; x++)
-			fwrite(&pixels[((size_t)y * width + x) * 4], 1, 3, f);
-	fclose(f);
 	NOTICE_LOG(RENDERER, "XR: captured the left eye to %s/eye0.ppm", dir.c_str());
 
 	// ...and the picture the console's video output reads from VRAM right now, which is
@@ -927,7 +1319,7 @@ void captureIfRequested(GLuint fbo, int width, int height)
 	PixelBuffer<u32> pb;
 	int fbWidth = 0, fbHeight = 0;
 	ReadFramebuffer<RGBAPacker>(info, pb, fbWidth, fbHeight);
-	f = fbWidth > 0 && fbHeight > 0 ? fopen((dir + "/fb0.ppm").c_str(), "wb") : nullptr;
+	FILE *f = fbWidth > 0 && fbHeight > 0 ? fopen((dir + "/fb0.ppm").c_str(), "wb") : nullptr;
 	if (f == nullptr)
 		return;
 	fprintf(f, "P6\n%d %d\n255\n", fbWidth, fbHeight);
@@ -992,14 +1384,6 @@ const Eye *currentEye()
 	return drawingEye ? &eye : nullptr;
 }
 
-bool recentShot(glm::vec2& screen)
-{
-	if (lastShot == 0 || lastFrameTime - lastShot > 400'000'000)	// 0.4 s
-		return false;
-	screen = lastShotScreen;
-	return true;
-}
-
 void term()
 {
 	if (instance != XR_NULL_HANDLE)
@@ -1026,9 +1410,9 @@ void term()
 	instance = XR_NULL_HANDLE;
 	systemId = XR_NULL_SYSTEM_ID;
 	session = XR_NULL_HANDLE;
-	localSpace = aimSpaces[Left] = aimSpaces[Right] = XR_NULL_HANDLE;
+	localSpace = aimSpaces[Left] = aimSpaces[Right] = gripSpaces[Left] = gripSpaces[Right] = XR_NULL_HANDLE;
 	actionSet = XR_NULL_HANDLE;
-	aimAction = triggerAction = startAction = reloadAction = recenterAction = hapticAction = stickAction = gripAction = XR_NULL_HANDLE;
+	aimAction = handAction = triggerAction = startAction = skipAction = recenterAction = hapticAction = stickAction = gripAction = XR_NULL_HANDLE;
 	requestRefreshRate = nullptr;
 	setPerformanceLevel = nullptr;
 	sessionRunning = focused = drawingEye = false;

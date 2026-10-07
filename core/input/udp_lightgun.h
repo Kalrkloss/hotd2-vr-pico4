@@ -9,7 +9,9 @@
 
 // Aim and fire the emulated light gun directly (the UDP datagrams and the headset's
 // controller both end up here). x, y in 1/10000ths of the game screen (outside is
-// off-screen); buttons: bit 0 trigger, bit 1 reload (off-screen shot), bit 2 start.
+// off-screen); buttons: bit 0 trigger, bit 1 reload (off-screen shot), bit 2 start,
+// bits 3-6 the D-pad (up, down, left, right), bit 7 the gun's B (skip, back), bit 8: this
+// shot hit the headset's 2D plane (menus, text), so the game's own shot marker stays.
 void lightgunSet(int player, int x, int y, u32 buttons);
 
 // True while the UDP light gun drives this port (a datagram arrived recently).

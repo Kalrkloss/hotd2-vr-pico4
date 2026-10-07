@@ -11,14 +11,16 @@ textures dropped.
 
 Gun space (see core/rend/vr/xr_gun.h): the controller's aim pose, metres, -z forward
 along the barrel, +y up, +x right. The model has its barrel along +x and +y up, at real
-size (25 cm). Its grip is placed where the hand holds the controller.
+size (25 cm). The app puts its grip in the hand and scales it at runtime (gunPlacement in
+core/rend/vr/xr_gun.h, vr.GunScale).
 """
 import sys
 import numpy as np
 from glb import load
 
-# Model point at the top of the grip, behind the trigger guard (where the web of the
-# hand sits), and where that goes in gun space.
+# A model point on the front of the grip at middle-finger height (not the web of the hand,
+# as this used to say), and where it goes. Kept as baked: xr_gun.h's ModelPalm is measured
+# against this placement.
 GRIP_ANCHOR = np.array([-0.072, -0.030, 0.0])
 GRIP_TARGET = np.array([0.0, -0.022, 0.050])
 # Centre of the front lens (the "muzzle"): shots and the aim line start here.

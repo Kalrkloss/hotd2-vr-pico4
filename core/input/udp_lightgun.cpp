@@ -11,7 +11,8 @@
 	Integers on purpose: Flycast switches the C locale to the user's, and "%f" then
 	expects a decimal comma on e.g. Dutch Windows.
 	buttons: bit 0 trigger, bit 1 reload (off-screen shot), bit 2 start, bits 3-6 the gun's
-	D-pad (up, down, left, right), bit 7 its B button.
+	D-pad (up, down, left, right), bit 7 its B button, bit 8: the shot hit the headset's 2D
+	plane (menus, text), where the game's own shot marker is in the right place.
 
 	Copyright 2026 mikermak. This file is part of Flycast and is distributed under the GNU GPL v2 or later.
 */
@@ -23,6 +24,7 @@
 #include "input/gamepad_device.h"
 #include "input/mouse.h"
 #include "log/Log.h"
+#include "rend/vr_reproject.h"
 
 #include <atomic>
 #include <chrono>
@@ -85,6 +87,9 @@ void lightgunSet(int player, int x, int y, u32 buttons)
 	const u32 changed = buttons ^ lastButtons[player];
 	if (changed & 1)
 		setButton(player, DC_BTN_A, buttons & 1);
+	if ((changed & 1) && (buttons & 1) && player == 0)
+		// the game draws its own shot marker here (see vr::dropShotMarker)
+		vr::noteGunShot(mo_x_abs[player], mo_y_abs[player], (buttons & 256) == 0);
 	if (changed & 2)
 		setButton(player, DC_BTN_RELOAD, buttons & 2);
 	if (changed & 4)
@@ -99,10 +104,10 @@ void lightgunSet(int player, int x, int y, u32 buttons)
 		setButton(player, DC_DPAD_RIGHT, buttons & 64);
 	if (changed & 128)
 		setButton(player, DC_BTN_B, buttons & 128);
-	if (changed)
-		NOTICE_LOG(INPUT, "Light gun P%d at %d,%d: trigger %d reload %d start %d d-pad %x B %d", player + 1,
+	if (changed & 0xff)		// (bit 8 flips whenever a held trigger crosses into the 2D plane)
+		NOTICE_LOG(INPUT, "Light gun P%d at %d,%d: trigger %d reload %d start %d d-pad %x B %d 2D %d", player + 1,
 				mo_x_abs[player], mo_y_abs[player], buttons & 1, (buttons >> 1) & 1, (buttons >> 2) & 1,
-				(buttons >> 3) & 15, (buttons >> 7) & 1);
+				(buttons >> 3) & 15, (buttons >> 7) & 1, (buttons >> 8) & 1);
 	lastButtons[player] = buttons;
 }
 

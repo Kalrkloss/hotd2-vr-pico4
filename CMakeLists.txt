@@ -1279,7 +1279,8 @@ if(NOT LIBRETRO)
 			target_link_libraries(${PROJECT_NAME} PRIVATE OpenXR::openxr_loader)
 			target_compile_definitions(${PROJECT_NAME} PRIVATE USE_OPENXR)
 			target_sources(${PROJECT_NAME} PRIVATE core/rend/vr/xr_host.cpp core/rend/vr/xr_host.h
-			core/rend/vr/xr_gun.cpp core/rend/vr/xr_gun.h core/rend/vr/gun_model.h)
+			core/rend/vr/xr_gun.cpp core/rend/vr/xr_gun.h core/rend/vr/gun_model.h
+			core/rend/vr/xr_hands.cpp core/rend/vr/xr_hands.h)
 		endif()
 
 	elseif(APPLE)

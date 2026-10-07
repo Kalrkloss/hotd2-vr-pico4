@@ -94,7 +94,6 @@ uniform highp mat4 vrMat;
 uniform highp vec2 vrTan;
 uniform highp vec4 vrOverlay;
 uniform highp vec3 vrComfort;
-uniform highp vec4 vrShot;
 #endif
 
 /* Vertex input */
@@ -138,19 +137,10 @@ void main()
 		if (abs(vpos.w - vrOverlay.w) < 0.002)
 		{
 			// 2D overlay: pin to a plane at a fixed depth, at its original on-screen size.
-			// Opaque black overlay is the cinematic letterbox: pushed out of view when hidden.
-			#if VR_HIDE_BLACK == 1
-			if (in_base.a > 0.99 && all(lessThan(in_base.rgb, vec3(0.01))))
-				vpos = vec4(2.0, 2.0, 0.0, 1.0);
-			else
-			#endif
+			// (The cinematic letterbox, whole opaque black polygons, is taken out before this:
+			// vr::dropShotMarker at TA parse time.)
 			{
 				highp vec2 ndc = vpos.xy / vpos.w;
-				// The game's 2D shot effects (flash, hole) go where it registered the shot:
-				// with a widened view that is further out on this stock-framed plane.
-				// vrShot: the shot in screen ndc, the radius around it, and whether active.
-				if (vrShot.w > 0.0 && distance(ndc, vrShot.xy) < vrShot.z)
-					ndc += vrShot.xy * (vrTan / vrOverlay.xy - 1.0);
 				vpos = vrMat * vec4(ndc * vrOverlay.xy * vrOverlay.z, -vrOverlay.z, 1.0);
 			}
 		}
@@ -819,7 +809,6 @@ public:
 		addConstant("pp_Gouraud", gouraud);
 		addConstant("DIV_POS_Z", divPosZ);
 		addConstant("VR_REPROJECT", divPosZ && config::VrReproject);
-		addConstant("VR_HIDE_BLACK", config::VrHideLetterbox);
 
 		addSource(VertexCompatShader);
 		addSource(GouraudSource);
@@ -919,7 +908,6 @@ bool CompilePipelineShader(PipelineShader* s)
 	s->vrTan = glGetUniformLocation(s->program, "vrTan");
 	s->vrOverlay = glGetUniformLocation(s->program, "vrOverlay");
 	s->vrComfort = glGetUniformLocation(s->program, "vrComfort");
-	s->vrShot = glGetUniformLocation(s->program, "vrShot");
 	s->ditherDivisor = glGetUniformLocation(s->program, "ditherDivisor");
 	s->texSize = glGetUniformLocation(s->program, "texSize");
 
@@ -950,7 +938,6 @@ static void create_modvol_shader()
 	gl.modvol_shader.vrTan = glGetUniformLocation(gl.modvol_shader.program, "vrTan");
 	gl.modvol_shader.vrOverlay = glGetUniformLocation(gl.modvol_shader.program, "vrOverlay");
 	gl.modvol_shader.vrComfort = glGetUniformLocation(gl.modvol_shader.program, "vrComfort");
-	gl.modvol_shader.vrShot = glGetUniformLocation(gl.modvol_shader.program, "vrShot");
 	gl.modvol_shader.sp_ShaderColor = glGetUniformLocation(gl.modvol_shader.program, "sp_ShaderColor");
 	gl.modvol_shader.depth_scale = glGetUniformLocation(gl.modvol_shader.program, "depth_scale");
 
@@ -1216,7 +1203,6 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 		ShaderUniforms.vrTan = vrParams.tanHalf;
 		ShaderUniforms.vrOverlay = vrParams.overlay;
 		ShaderUniforms.vrComfort = vrParams.comfort;
-		ShaderUniforms.vrShot = vrParams.shot;
 	}
 
 	ShaderUniforms.depth_coefs[0] = 2.f / vtx_max_fZ;
@@ -1249,8 +1235,6 @@ bool OpenGLRenderer::renderFrame(int width, int height)
 			glUniform4fv(gl.modvol_shader.vrOverlay, 1, &ShaderUniforms.vrOverlay[0]);
 		if (gl.modvol_shader.vrComfort != -1)
 			glUniform3fv(gl.modvol_shader.vrComfort, 1, &ShaderUniforms.vrComfort[0]);
-		if (gl.modvol_shader.vrShot != -1)
-			glUniform4fv(gl.modvol_shader.vrShot, 1, &ShaderUniforms.vrShot[0]);
 		glUniform1f(gl.modvol_shader.sp_ShaderColor, 1 - FPU_SHAD_SCALE.scale_factor / 256.f);
 
 		glcache.UseProgram(gl.n2ModVolShader.program);

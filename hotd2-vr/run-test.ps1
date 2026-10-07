@@ -39,6 +39,8 @@ public static class Win {
 	[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();
 	[DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
 	[DllImport("user32.dll")] public static extern uint MapVirtualKey(uint code, uint mapType);
+	[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+	[DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
 }
 '@
 # Without this, a scaled display reports a shrunken client rect and shots get cropped.
@@ -74,6 +76,8 @@ try {
 			continue
 		}
 		$at = $ev.At
+		# a minimized window has no client area to print: show it again, without taking focus
+		if ([Win]::IsIconic($h)) { [void][Win]::ShowWindow($h, 4); Start-Sleep -Milliseconds 300 }
 		$r = New-Object Win+RECT
 		[void][Win]::GetClientRect($h, [ref]$r)
 		$bmp = New-Object System.Drawing.Bitmap ([Math]::Max(1, $r.R)), ([Math]::Max(1, $r.B))

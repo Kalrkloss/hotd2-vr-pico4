@@ -17,6 +17,7 @@
 #include <glm/glm.hpp>
 
 struct rend_context;
+struct RenderPass;
 
 namespace vr
 {
@@ -33,18 +34,24 @@ struct ReprojectParams
 	// Comfort zone in the headset (see comfortScale): metres per game unit, distance the
 	// pull-back starts at, closest distance (metres). All 0 when off.
 	glm::vec3 comfort { 0.f };
-	// The last shot, while the game may be drawing its 2D effects for it: screen ndc
-	// (x, y), radius (z), active (w).
-	glm::vec4 shot { 0.f };
 };
 
 // The game's own field of view is widened (its code patched, see vr_reproject.cpp): it
-// then also tests light gun hits with the wide view.
+// then draws and culls with the wide view. (Its light gun hit test still uses the stock
+// view: see aimAtScene in vr/xr_host.cpp.)
 bool widensGameFov();
 
 // The comfort zone's parameters for the headset (vr.WorldScale, vr.ComfortStart,
 // vr.ComfortMin), or zero when it is switched off.
 glm::vec3 comfortParams();
+
+// The light gun fired at (x, y), DC pixels (640x480); into3D: into the 3D scene, not at
+// the 2D plane (menus, text). From lightgunSet, any thread.
+void noteGunShot(int x, int y, bool into3D);
+// After a shot into 3D, takes the game's own 2D shot marker out of a pass the TA just
+// parsed, before its index is built (ta_vtx.cpp parseRenderPass); vr.DropShotMarker.
+// On the PC it also logs what it sees around shots and overlay that could bend, for tuning.
+void dropShotMarker(rend_context& ctx, const RenderPass& pass, const RenderPass& previousPass);
 
 // Things that come closer to the game camera than the comfort start, straight ahead (a
 // zombie grabbing you), are pulled back along the line of sight, smoothly, to no closer

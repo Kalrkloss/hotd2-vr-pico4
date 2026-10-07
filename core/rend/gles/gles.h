@@ -63,7 +63,6 @@ struct PipelineShader
 	GLint vrTan;
 	GLint vrOverlay;
 	GLint vrComfort;
-	GLint vrShot;
 	GLint palette_index;
 	GLint ditherDivisor;
 	GLint texSize;
@@ -243,7 +242,6 @@ struct gl_ctx
 		GLint vrTan;
 		GLint vrOverlay;
 		GLint vrComfort;
-		GLint vrShot;
 	} modvol_shader;
 
 	struct
@@ -429,7 +427,6 @@ extern struct ShaderUniforms_t
 	glm::vec2 vrTan;
 	glm::vec4 vrOverlay;
 	glm::vec3 vrComfort;	// world scale, comfort start, comfort minimum (metres); 0: off
-	glm::vec4 vrShot;		// last shot in screen ndc, radius, active
 	struct {
 		bool enabled;
 		int x;
@@ -472,8 +469,6 @@ extern struct ShaderUniforms_t
 			glUniform4fv(s->vrOverlay, 1, &vrOverlay[0]);
 		if (s->vrComfort != -1)
 			glUniform3fv(s->vrComfort, 1, &vrComfort[0]);
-		if (s->vrShot != -1)
-			glUniform4fv(s->vrShot, 1, &vrShot[0]);
 
 		if (s->ditherDivisor != -1)
 			glUniform4fv(s->ditherDivisor, 1, ditherDivisor);

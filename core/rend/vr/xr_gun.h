@@ -1,7 +1,8 @@
 /*
-	The player's light gun in the headset (hotd2-vr): a Namco arcade gun in red plastic,
-	held in the hand that shoots, with recoil, a muzzle flash and an optional aim line and
-	dot. Drawn by xr_host.cpp into each eye after the game image.
+	The player's light gun in the headset (hotd2-vr): a Namco arcade gun in red plastic, or
+	the agent's own pistol and hands from the game (xr_hands.h), held in the hand that
+	shoots, with recoil, a muzzle flash and an optional aim line and dot. Drawn by
+	xr_host.cpp into each eye after the game image.
 
 	Room space here is the headset's local space relative to the game camera's origin
 	(metres, y up), the same space the eye views are built in.
@@ -10,18 +11,51 @@
 */
 #pragma once
 #include <glm/glm.hpp>
+#include <glm/gtc/matrix_transform.hpp>
 
 namespace vr::xr
 {
 
-// The muzzle (the model's front lens), in gun space (the controller's aim pose: -z
-// forward, y up, metres). Shots and the aim line start here, along -z. Must match
-// gun_model.h (checked when compiling xr_gun.cpp).
+// Gun space is the controller's aim pose: -z forward, y up, metres. Model space is
+// gun_model.h as baked, in the same axes; gunPlacement() puts the model in the hand.
+
+// The arcade gun's muzzle (the model's front lens), in model space. Shots and the aim line
+// start at gunPlacement(...) * gunMuzzle(), along -z. Must match gun_model.h (checked when
+// compiling xr_gun.cpp).
 constexpr glm::vec3 GunMuzzle { 0.00000f, 0.04710f, -0.14010f };
+
+// Where the hand holds the model: the middle of its grip, between the middle and ring
+// fingers, in model space. (The bake's anchor sits lower on the grip than its comment
+// said, which put the gun about 6 cm above the hand.)
+constexpr glm::vec3 ModelPalm { 0.f, -0.018f, 0.062f };
+// Where the hand is, in gun space, when the runtime can't say (xr_host.cpp asks for the
+// controller's grip pose): Meta's grip -> aim offset for Touch controllers, (0, -0.0196,
+// -0.1010) and -60 degrees about x, inverted. For the "old" aim pose (OpenXR before
+// 1.1.49; this app asks for 1.0.34).
+constexpr glm::vec3 HandPalm { 0.f, -0.078f, 0.068f };
+
+// The pistol drawn: the agent's own from the game (xr_hands.h) when there is one and
+// vr.GameHands is on, else the arcade gun. Model space is then gun space of xr_hands.h,
+// with its origin in the fist.
+bool gameGun();
+// The muzzle in model space, of whichever pistol it is.
+glm::vec3 gunMuzzle();
+
+// Model space -> gun space: the model's grip on the hand (palm, gun space), at `scale`
+// times the model's own size (arcade gun, vr.GunScale: 1 is 24.7 cm long, 17.1 cm tall;
+// game pistol, vr.HandScale: 1 is 20 cm long). Mirrored in x for the left hand (the game's
+// pistol is in a right hand).
+inline glm::mat4 gunPlacement(bool game, float scale, const glm::vec3& palm = HandPalm, bool mirror = false)
+{
+	glm::mat4 m = glm::translate(glm::mat4(1.f), palm);
+	m = glm::scale(m, glm::vec3(mirror ? -scale : scale, scale, scale));
+	return game ? m : glm::translate(m, -ModelPalm);
+}
 
 struct GunView
 {
-	glm::mat4 pose { 1.f };		// gun space -> room space, recoil included
+	glm::mat4 pose { 1.f };		// model space -> room space: placement and recoil included
+	float scale = 1.f;			// for the flash and smoke: 1 goes with the arcade gun at full size
 	glm::vec3 restMuzzle { 0.f };	// room space, without recoil: where smoke leaves the barrel
 	glm::vec3 restForward { 0.f, 0.f, -1.f };
 	float trigger = 0.f;		// 0..1, how far the trigger is pulled
@@ -30,7 +64,12 @@ struct GunView
 	unsigned shot = 0;			// counts shots: each looks a bit different
 	bool aimLine = false;		// draw the line from the muzzle to the aim point
 	bool aimDot = false;		// draw the dot at the aim point
+	bool aimOutside = false;	// ...greyed: the game can't hit there (outside its own view)
 	glm::vec3 aimPoint { 0.f };	// room space
+	// The game's pistol only (gameGun()):
+	float slide = 0.f;			// metres its slide is back, in model space
+	bool otherHand = false;		// the open hand on the other controller, or racking the slide...
+	glm::mat4 handPose { 1.f };	// ...hand space (xr_hands.h) -> room space
 };
 
 // How hard the gun kicks back, sinceShot seconds after a shot: a sharp kick, a small
