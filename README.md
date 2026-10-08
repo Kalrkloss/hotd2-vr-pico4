@@ -1,3 +1,6 @@
+An attempt to port this project to teh PICO 4 VR headset.
+
+Original readme:
 # The House of the Dead 2 VR
 
 Stand inside **The House of the Dead 2** (Sega Dreamcast) on a **Meta Quest 3**, standalone.
