@@ -1,4 +1,4 @@
-An attempt to port this project to teh PICO 4 VR headset.
+An attempt to port this project to the PICO 4 VR headset.
 
 Original readme:
 # The House of the Dead 2 VR
